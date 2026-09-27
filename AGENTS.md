@@ -195,6 +195,7 @@ Record the resulting mode, `yolo` merge posture, and the one-line reason for any
 
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
+For this home's explicit captain preference, a completed branch awaiting the captain's merge decision never pauses other independently actionable AFK work; continue and finish it unless a genuine semantic or delivery dependency requires serialization.
 Write the task-specific brief under section 11 before spawning.
 Fill the task subsections according to section 11.
 
@@ -219,8 +220,9 @@ Supervise all live work under section 8.
 ### Selected delivery path and merge authority
 
 The selected delivery path owns its own rigor.
-When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
-Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
+By default, when no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
+By default, never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
+When this home's `data/captain.md` explicitly calls for two-pass coding, load `two-pass-coding` before scoping an authorized coding ship; it owns the captain-requested exception to these review defaults, not a fleet-wide default.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
 If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
 The path's worker, automated gates, and captain approval remain authoritative:
