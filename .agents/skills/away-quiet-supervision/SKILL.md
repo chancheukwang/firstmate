@@ -8,7 +8,9 @@ metadata:
 
 # Away and quiet supervision safety
 
-The `/afk` and `/quiet` skills own their respective entry procedures and share the daemon machinery; [architecture](../../../docs/architecture.md) owns the captain-held recheck difference between their postures.
+The `/afk` and `/quiet` skills own their respective entry procedures; [architecture](../../../docs/architecture.md) owns the captain-held recheck difference between their postures.
+Pi quiet mode uses `state/.pi-quiet` without the away record or daemon: the ordinary attended branch continues and captain outcomes still reach main.
+The lifecycle facts below apply to record-backed away or quiet mode on the other paths.
 These safety facts apply to both:
 
 - Every current daemon injection uses the `away-supervisor` kind from `bin/fm-operational-input.sh` after `FM_OPERATIONAL_PREFIX` (U+2063 INVISIBLE SEPARATOR followed by `FIRSTMATE_OP: `), except that a Claude Code primary, which strips U+2063, receives that owner's record-backed doorbell and it counts as marked only when `bin/fm-operational-input.sh open <path>` verifies its record; the `/afk` skill owns legacy bare-marker compatibility.

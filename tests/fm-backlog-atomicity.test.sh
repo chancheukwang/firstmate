@@ -1325,7 +1325,7 @@ test_dispatch_refuses_to_commit_without_a_published_record() {
   pass "dispatch cannot commit without a verified task-record publication"
 }
 
-test_dispatch_leaves_no_record_when_the_transition_fails() {
+test_dispatch_preserves_launched_worker_when_the_transition_fails() {
   local case_dir id out rc=0
   id=atomic-dispatch-b4
   case_dir=$(make_home dispatch-transition-fails "$id")
@@ -1336,16 +1336,18 @@ test_dispatch_leaves_no_record_when_the_transition_fails() {
   [ "$rc" -ne 0 ] || fail "spawn reported success though the backlog transition failed"
   assert_contains "$out" "could not be moved to In flight" \
     "spawn failed without explaining the backlog transition failure"
-  assert_absent "$(home_of "$case_dir")/state/$id.meta" \
-    "a failed backlog transition left an orphaned record behind"
-  assert_absent "$(home_of "$case_dir")/state/$id.busy-state" \
-    "a failed backlog transition left the task's armed busy generation behind"
+  assert_contains "$out" "the launched worker may be running" \
+    "spawn did not explain why ownership must be preserved"
+  assert_present "$(home_of "$case_dir")/state/$id.meta" \
+    "a failed backlog transition erased a possibly live worker's record"
+  assert_present "$(home_of "$case_dir")/state/$id.busy-state" \
+    "a failed backlog transition erased the worker's busy generation"
   [ "$(row_state "$case_dir" "$id")" = queued ] \
     || fail "a failed dispatch left the backlog item in $(row_state "$case_dir" "$id")"
-  pass "a failed backlog transition fails the dispatch loudly and leaves no record"
+  pass "a failed backlog transition preserves ownership of the possibly live worker"
 }
 
-test_dispatch_reports_an_incomplete_record_rollback() {
+test_dispatch_preserves_record_with_failed_removal_shim() {
   local case_dir id meta out rc=0
   id=atomic-dispatch-remove-failure-b5
   case_dir=$(make_home dispatch-remove-failure "$id")
@@ -1355,18 +1357,18 @@ test_dispatch_reports_an_incomplete_record_rollback() {
   break_meta_removal "$case_dir" "$meta"
 
   out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
-  [ "$rc" -ne 0 ] || fail "spawn reported success though transition and rollback failed"
-  assert_contains "$out" "failed-dispatch cleanup is incomplete" \
-    "spawn did not report that its provisional record remained"
-  assert_present "$meta" "failed record removal was reported as successful"
-  assert_absent "$(home_of "$case_dir")/state/$id.busy-state" \
-    "record-removal failure prevented busy-state rollback"
+  [ "$rc" -ne 0 ] || fail "spawn reported success though transition failed"
+  assert_contains "$out" "the launched worker may be running" \
+    "spawn did not report that its task record remained"
+  assert_present "$meta" "failed transition removed a possibly live worker's record"
+  assert_present "$(home_of "$case_dir")/state/$id.busy-state" \
+    "failed transition removed the worker's busy generation"
   [ "$(row_state "$case_dir" "$id")" = queued ] \
     || fail "failed rollback changed the backlog row"
-  pass "dispatch reports when failed-transition rollback cannot remove its record"
+  pass "dispatch preserves a launched worker even when record removal would fail"
 }
 
-test_dispatch_reports_an_incomplete_busy_rollback() {
+test_dispatch_preserves_busy_with_failed_removal_shim() {
   local case_dir id out rc=0
   id=atomic-dispatch-busy-remove-failure-b5
   case_dir=$(make_home dispatch-busy-remove-failure "$id")
@@ -1375,16 +1377,16 @@ test_dispatch_reports_an_incomplete_busy_rollback() {
   break_busy_removal "$case_dir" "$id"
 
   out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
-  [ "$rc" -ne 0 ] || fail "spawn succeeded though busy rollback failed"
-  assert_contains "$out" "did not remove both task and busy records" \
-    "spawn did not report incomplete busy rollback"
-  assert_absent "$(home_of "$case_dir")/state/$id.meta" \
-    "busy rollback failure retained the provisional task record"
+  [ "$rc" -ne 0 ] || fail "spawn succeeded though backlog transition failed"
+  assert_contains "$out" "the launched worker may be running" \
+    "spawn did not report preserved ownership"
+  assert_present "$(home_of "$case_dir")/state/$id.meta" \
+    "failed transition removed the possibly live worker's record"
   assert_present "$(home_of "$case_dir")/state/$id.busy-state" \
-    "busy removal failure was reported as successful"
+    "failed transition removed the worker's busy generation"
   [ "$(row_state "$case_dir" "$id")" = queued ] \
     || fail "failed busy rollback changed the backlog row"
-  pass "dispatch verifies both task and busy records during rollback"
+  pass "dispatch preserves both task and busy records after launch"
 }
 
 test_dispatch_rolls_back_before_a_failed_launch_delivery() {
@@ -1531,9 +1533,9 @@ test_dispatch_does_not_resurrect_a_row_closed_after_preflight() {
   assert_contains "$out" "state done" "spawn did not report the row's ineligible state"
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
     || fail "spawn resurrected a row closed after preflight"
-  assert_absent "$(home_of "$case_dir")/state/$id.meta" \
-    "spawn retained a record after its row was closed"
-  pass "dispatch does not resurrect a row closed after preflight"
+  assert_present "$(home_of "$case_dir")/state/$id.meta" \
+    "spawn erased a possibly live worker's record after its row was closed"
+  pass "dispatch preserves worker ownership without resurrecting a closed row"
 }
 
 test_dispatch_fails_when_its_row_vanishes_after_preflight() {
@@ -1547,10 +1549,10 @@ test_dispatch_fails_when_its_row_vanishes_after_preflight() {
   [ "$rc" -ne 0 ] || fail "spawn succeeded after its backlog row vanished"
   assert_contains "$out" "vanished before dispatch commit" \
     "spawn did not report that its backlog row vanished"
-  assert_absent "$(home_of "$case_dir")/state/$id.meta" \
-    "spawn retained a record after its backlog row vanished"
+  assert_present "$(home_of "$case_dir")/state/$id.meta" \
+    "spawn erased a possibly live worker's record after its backlog row vanished"
   [ -z "$(row_state "$case_dir" "$id")" ] || fail "spawn recreated a removed backlog row"
-  pass "dispatch fails when its backlog row vanishes after preflight"
+  pass "dispatch preserves worker ownership when its backlog row vanishes"
 }
 
 # --- completion -------------------------------------------------------------
@@ -3060,9 +3062,9 @@ test_dispatch_refuses_an_id_this_home_has_no_item_for
 test_dispatch_reports_a_backlog_read_failure
 test_dispatch_refuses_a_closed_item
 test_dispatch_refuses_to_commit_without_a_published_record
-test_dispatch_leaves_no_record_when_the_transition_fails
-test_dispatch_reports_an_incomplete_record_rollback
-test_dispatch_reports_an_incomplete_busy_rollback
+test_dispatch_preserves_launched_worker_when_the_transition_fails
+test_dispatch_preserves_record_with_failed_removal_shim
+test_dispatch_preserves_busy_with_failed_removal_shim
 test_dispatch_rolls_back_before_a_failed_launch_delivery
 test_dispatch_defers_interruption_across_backlog_commit
 test_deferred_signal_reads_back_preserved_state

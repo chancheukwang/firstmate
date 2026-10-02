@@ -221,7 +221,13 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
     exit 125
   fi
   owner=${FM_EXEC_TIMED_OWNER_PID:-$$}
-  [ "$owner" != "$BASHPID" ] || owner=$PPID
+  # Bash 3.2 has BASH_SUBSHELL but no BASHPID. In a subshell $$ names the
+  # owning script; at top level it names this shell, which exec replaces.
+  if [ "${BASH_SUBSHELL:-0}" -eq 0 ] && [ "$owner" = "$$" ]; then
+    owner=$PPID
+  elif [ -n "${BASHPID:-}" ] && [ "$owner" = "$BASHPID" ]; then
+    owner=$PPID
+  fi
   unset FM_EXEC_TIMED_OWNER_PID
   if command -v perl >/dev/null 2>&1; then
     exec perl -MPOSIX=WNOHANG,setpgid -MTime::HiRes=time -e '

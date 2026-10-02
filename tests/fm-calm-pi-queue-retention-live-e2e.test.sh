@@ -40,6 +40,7 @@ fm_git_init_commit "$PROJECT"
 cp "$ROOT/.pi/extensions/lib/fm-calm-pending-operational-layout.ts" "$PROJECT/.pi/extensions/lib/"
 cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$PROJECT/.pi/extensions/lib/"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$PROJECT/.pi/extensions/lib/"
+cp "$ROOT/.pi/extensions/lib/fm-main-provider-cooldown.ts" "$PROJECT/.pi/extensions/lib/"
 
 cat >"$PROJECT/queue-retention-probe.ts" <<'TS'
 import { writeFileSync } from "node:fs";

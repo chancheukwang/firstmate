@@ -229,6 +229,8 @@ WATCH_HOME_EXISTED=0
 # below).
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
 # Persistent-secondmate endpoint liveness: the shared probe/relaunch library is
 # the same one bin/fm-bootstrap.sh's session-start sweep drives, so ordinary
 # supervision recovers a positively dead or missing mate through the identical
@@ -815,9 +817,11 @@ signal_turnend_panes_churned() {  # <file> ...
 }
 
 recorded_windows() {
-  local meta w seen=
+  local meta w seen='' id
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
+    id=${meta##*/}; id=${id%.meta}
+    fm_sup_task_settled "$STATE" "$id" && continue
     w=$(fm_backend_target_of_meta "$meta")
     [ -n "$w" ] || continue
     case "$seen" in
@@ -826,6 +830,66 @@ recorded_windows() {
     seen="$seen|$w|"
     printf '%s\n' "$w"
   done
+}
+
+# A completion may be acknowledged while no-mistakes is still validating.
+# Once that external run reaches a final state, no new worker status line is
+# required, so retry the local receipt check without waking a model.
+settle_reported_completions() {
+  local meta id kind status marker line receipt signature retry=${FM_SETTLE_RETRY_SECS:-60}
+  case "$retry" in ''|*[!0-9]*) retry=60 ;; esac
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    id=${meta##*/}; id=${id%.meta}
+    kind=$(fm_meta_get "$meta" kind)
+    case "$kind" in ship|scout) ;; *) continue ;; esac
+    status="$STATE/$id.status"
+    [ -f "$status" ] && [ ! -L "$status" ] || continue
+    line=$(status_current_line "$status" "$kind")
+    [ "$(status_line_verb "$line")" = 'done' ] || continue
+    receipt="$STATE/.supervision-settled/$id"
+    if [ -f "$receipt" ] && [ ! -L "$receipt" ]; then
+      signature=$(fm_sup_task_signature "$STATE" "$id") || signature=
+      [ -n "$signature" ] && [ "$(cat "$receipt" 2>/dev/null)" = "$signature" ] && continue
+    fi
+    marker="$STATE/.$id.settle-retry"
+    [ "$(age_of "$marker")" -ge "$retry" ] || continue
+    touch "$marker" || continue
+    if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      bash "$SCRIPT_DIR/fm-supervision-settle.sh" "$id" >/dev/null 2>&1; then
+      triage_log "settled handled completion: $id"
+    fi
+  done
+}
+
+# A held decision or declared wait already surfaced to firstmate remains in
+# the task ledger and watcher scans. Repeating the same away heartbeat adds no
+# new obligation, provided the worker has not resumed and no event is pending.
+away_heartbeat_has_active_obligation() {
+  local meta id kind status line crew crew_state_bin=${FM_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    id=${meta##*/}; id=${id%.meta}
+    fm_sup_task_settled "$STATE" "$id" && continue
+    kind=$(fm_meta_get "$meta" kind)
+    [ "$kind" != secondmate ] || return 0
+    status="$STATE/$id.status"
+    [ -f "$status" ] && [ ! -L "$status" ] || return 0
+    fm_wake_signal_reported_current "$STATE" "$status" || return 0
+    fm_sup_task_has_unhandled_event "$STATE" "$id" && return 0
+    line=$(status_current_line "$status" "$kind")
+    if ! status_is_paused_or_captain_held "$line" \
+      && [ "$(status_line_verb "$line")" != needs-decision ]; then
+      return 0
+    fi
+    crew=$(FM_CREW_STATE_NO_FORGE=1 FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      bash "$crew_state_bin" "$id" 2>/dev/null) || return 0
+    case "$crew" in
+      'state: paused · '*|'state: parked · '*|'state: unknown · source: none · backend target gone:'*) ;;
+      *) return 0 ;;
+    esac
+  done
+  return 1
 }
 
 # Print the oldest structurally valid ACTIONABLE row in a local secondmate's
@@ -1827,7 +1891,7 @@ stale_wait_declaration() {  # <task>
   printf 'declared:%s' "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
 }
 
-# The same scope for a captain call, carrying the CALL's own lifecycle identity
+# The scope for a captain call, carrying the CALL's own lifecycle identity
 # beside the status signature. The status log is not enough on its own: a task
 # can be answered with `--release` and held again as a genuinely different call
 # without any status append, and binding the throttle to the signature alone let
@@ -1871,14 +1935,16 @@ stale_wait_record() {  # <window-key>
 # preserves their no-backlog-read hot path.
 # While the away-posture record exists the bound is absolute: an open captain
 # call is never rechecked, whatever the throttle says, because nobody is there
-# to answer it and the return brief lists it.
+# to answer it and the return brief lists it. While present, the same call and
+# status state surface once, without a timer-driven reminder. A new status
+# event or a released-then-reheld call still has a distinct declaration.
 captain_call_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2
   STALE_WAIT_DECLARATION=
   task_captain_call_open "$task" || return 1
   STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
   away_record_present && return 0
-  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+  [ "$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)" = "$STALE_WAIT_DECLARATION" ]
 }
 
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
@@ -1990,13 +2056,15 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # The caller records reported state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
 scan_signals() {
-  local f sig sf exclude
+  local f sig sf exclude id
   # A remote mate's own parent channel is not a self-home task status log; the
   # home-shape-aware exclusion and its precedent live in
   # status_scan_parent_channel_exclude (fm-classify-lib.sh).
   exclude=$(status_scan_parent_channel_exclude "$STATE")
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
     [ "$f" = "$exclude" ] && continue
+    id=${f##*/}; id=${id%.status}; id=${id%.turn-ended}
+    fm_sup_task_settled "$STATE" "$id" && continue
     if [ ! -e "$f" ]; then
       case "$f" in *.status) [ -L "$f" ] || continue ;; *) continue ;; esac
     fi
@@ -2269,6 +2337,7 @@ heartbeat_scan_finds_actionable() {
     [ -e "$f" ] || [ -L "$f" ] || continue
     [ "$f" = "$exclude" ] && continue
     task=$(basename "$f"); task="${task%.status}"
+    fm_sup_task_settled "$STATE" "$task" && continue
     record=$(status_span_first_actionable_record "$f" "$(hb_surfaced_offset "$task")")
     rc=$?
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
@@ -2664,6 +2733,16 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+  FM_SUP_CYCLE_CACHE=0
+  settle_reported_completions
+  FM_SUP_CYCLE_CACHE=1
+  FM_SUP_CYCLE_SETTLED=
+  for settled_meta in "$STATE"/*.meta; do
+    [ -f "$settled_meta" ] || continue
+    settled_id=${settled_meta##*/}; settled_id=${settled_id%.meta}
+    [ -e "$STATE/.supervision-settled/$settled_id" ] || continue
+    fm_sup_task_settled "$STATE" "$settled_id" || true
+  done
 
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
@@ -3226,9 +3305,10 @@ EOF
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
-    # without exiting); the away-mode daemon, when present, owns triage and wants
-    # every heartbeat.
-    if afk_present; then
+    # without exiting). Away-mode triage receives routine heartbeats only while
+    # a task has an active obligation; handled completions and unchanged held
+    # gates keep their passive event monitoring without a model turn.
+    if afk_present && away_heartbeat_has_active_obligation; then
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"

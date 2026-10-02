@@ -132,6 +132,7 @@ import {
   classifyFirstmateOperationalText,
   encodeFirstmateOperationalInputWith,
 } from "./lib/fm-operational-input.ts";
+import { FM_MAIN_PROVIDER_RECOVERED_EVENT, readProviderCooldown } from "./lib/fm-main-provider-cooldown.ts";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
@@ -993,6 +994,10 @@ export default function (pi: ExtensionAPI) {
   }
 
   function deliverRoutineOutcome(row: OutcomeRow): void {
+    // Quiet keeps the durable outcome store as the routine history. Sending
+    // even a hidden custom message would still grow main's model context.
+    // This is separate from away posture: captain outcomes still open turns.
+    if (existsSync(join(state, ".pi-quiet"))) return;
     const message = {
       customType: "fm-branch-merge",
       content: `${MERGE_NOTE_BOAT} ${row.task}: ${row.summary}`,
@@ -1076,6 +1081,7 @@ export default function (pi: ExtensionAPI) {
       processing = null;
       return true;
     }
+    if (readProviderCooldown(join(state, ".pi-main-provider-cooldown"), mainModel)) return true;
     const through = rows[rows.length - 1].seq;
     const sequences = rows.map((row) => row.seq).join(",");
     if (processing?.pending) return true;
@@ -1093,6 +1099,7 @@ export default function (pi: ExtensionAPI) {
       processing = null;
       return true;
     }
+    if (readProviderCooldown(join(state, ".pi-main-provider-cooldown"), mainModel)) return true;
     if (processing?.pending) return true;
     if (!processing || processing.sequences !== sequences) {
       processing = { sequences, through, triggered: 0, pending: false, nextTurnQueued: false };
@@ -1786,6 +1793,12 @@ ${context.command}
       branchBroken = "could not reconcile unread supervision outcomes into main";
     }
   });
+  pi.events?.on?.(FM_MAIN_PROVIDER_RECOVERED_EVENT, () => {
+    const recoveredGeneration = generation;
+    void enqueueDelivery(async () => {
+      if (await actingAsOwner(recoveredGeneration)) await presentUnprocessedOutcomes(recoveredGeneration);
+    });
+  });
 
   // Pi emits this for /model, Ctrl+P cycling, and session restore, so it is
   // the authoritative signal that "follow main" now means a different model.
@@ -1835,6 +1848,34 @@ ${context.command}
       branch = null;
     }
     await deactivateEligibleRowsOwner(state, wakeGrantScript, process.pid, String(closingGeneration));
+  });
+
+  pi.registerCommand?.("quiet", {
+    description: "Keep routine supervision updates in the outcome store; /quiet off restores per-event notes.",
+    handler: async (args, ctx) => {
+      const mode = args.trim();
+      if (mode !== "" && mode !== "on" && mode !== "off") {
+        ctx.ui.notify("Captain, use /quiet, /quiet on, or /quiet off.", "warning");
+        return;
+      }
+      if (!(await generationOwnsLock(generation))) {
+        ctx.ui.notify("Captain, quiet mode can only be changed by the session that owns this home.", "error");
+        return;
+      }
+      try {
+        const path = join(state, ".pi-quiet");
+        if (mode === "off") clearPinFile(path);
+        else writePinFile(path, "quiet");
+        ctx.ui.notify(
+          mode === "off"
+            ? "Captain, routine supervision notes are restored."
+            : "Captain, quiet is active. Routine updates stay in the outcome store; decisions and failures still reach you. Background supervision still runs. Use /quiet off to leave it.",
+          "info",
+        );
+      } catch (error) {
+        ctx.ui.notify(`Captain, quiet mode could not be saved: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+    },
   });
 
   // Pi keeps /model and its own thinking selector for the captain's own

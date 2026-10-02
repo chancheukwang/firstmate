@@ -3940,7 +3940,7 @@ test_identical_dead_display_of_a_successor_still_reports() {
 # awaiting their merge word.
 # Pinned here, in both directions: while the call stands the first sight still
 # alarms, further sights of the SAME call and status-log state are absorbed, and
-# a new pane hash after the window's end alarms once more; and the identical
+# elapsed time never repeats that unchanged call; and the identical
 # fixture WITHOUT the hold keeps alarming on every hash, because a bound that
 # swallowed an unheld delivery or blocker would be worse than the churn it removes.
 #
@@ -4072,17 +4072,25 @@ test_open_captain_call_bounds_stale_churn() {
     [ "$wakes" -eq 0 ] \
       || fail "[$name] pane churn re-alarmed held work $wakes time(s) inside the re-surface window"
 
-    # After the window ends, the next new pane hash re-surfaces held work exactly
-    # once, so a forgotten call on a churning pane cannot hide behind the bound.
+    # An unchanged decision remains pending without another reminder, even
+    # after the old reminder cadence elapses and the watcher restarts.
     [ -e "$throttle" ] || fail "[$name] the absorbed churn recorded no re-surface cadence to elapse"
     set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
-    hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
-      || fail "[$name] held work did not re-surface once its re-surface window elapsed"
+    hold_watch_churn "$dir" "$out" "$capture" 'idle, elapsed 9s' 1 \
+      || fail "[$name] unchanged captain call re-surfaced after the old reminder cadence"
     wakes=$(hold_stale_wakes "$state")
-    [ "$wakes" -eq 1 ] \
-      || fail "[$name] elapsed re-surface window produced $wakes wakes instead of one"
+    [ "$wakes" -eq 0 ] \
+      || fail "[$name] unchanged captain call produced $wakes repeated reminders"
+
+    # A new failure changes the status provenance and must still surface.
+    printf 'blocked: new CI failure\n' >> "$state/held-merge.status"
+    printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle, new failure' \
+      || fail "[$name] a new failure was hidden behind the old captain call"
+    [ "$(hold_stale_wakes "$state")" -eq 1 ] \
+      || fail "[$name] new failure did not surface exactly once"
   done
-  pass "work under an open captain call surfaces once, absorbs pane churn, then re-surfaces when the window elapses"
+  pass "work under an open captain call surfaces once and stays pending without repeated reminders across cadence and restart"
 }
 
 
@@ -6603,6 +6611,36 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
+test_away_handled_wait_absorbs_heartbeat_but_new_failure_wakes() {
+  local dir state pid out i
+  dir=$(make_case away-handled-wait)
+  state="$dir/state"
+  out="$dir/watch.out"
+  printf 'kind=ship\nmode=no-mistakes\nworktree=%s\n' "$dir" > "$state/task.meta"
+  printf 'paused: external review pending\n' > "$state/task.status"
+  prime_status_seen "$state" "$state/task.status"
+  date +%s > "$state/.afk"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · external review pending' \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 \
+    FM_SECONDMATE_LIVENESS_SECS=99999999 "$WATCH" > "$out" 2> "$dir/watch.err" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$state/.heartbeat-streak" ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.heartbeat-streak" ] || fail "handled wait never reached a heartbeat scan: $(cat "$out" "$dir/watch.err")"
+  kill -0 "$pid" 2>/dev/null || fail "unchanged handled wait woke the model: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "unchanged handled wait queued a wake"
+  printf 'failed: review service rejected the work\n' >> "$state/task.status"
+  wait_for_exit "$pid" 100 || fail "new failure after handled wait did not wake supervision"
+  grep -F 'signal:' "$out" >/dev/null || fail "new failure did not surface as a signal"
+  pass "away watcher absorbs unchanged handled wait heartbeats and surfaces a new failure"
+}
+
 # CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2
 # churn-deferral regression. The rest of this file is not a 3.2 snapshot suite.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -6737,6 +6775,7 @@ test_procevent_surface_serializes_with_drain
 test_procevent_surface_crash_boundaries
 test_procevent_marker_failure_exits_and_replays
 test_heartbeat_no_change_absorbed
+test_away_handled_wait_absorbs_heartbeat_but_new_failure_wakes
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing

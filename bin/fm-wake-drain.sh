@@ -889,6 +889,21 @@ if [ -n "$ACK_THROUGH" ]; then
   fi
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=true
+  if [ "$ACTOR" = branch ]; then
+    ACK_ROWS_FILE=$ELIGIBLE_ROWS_FILE
+  else
+    ACK_ROWS_FILE=$MAIN_ROWS_FILE
+  fi
+  # Only a status signal actually consumed by this actor may settle its task.
+  # Capture the task ids before queue replacement; the settlement owner then
+  # rechecks the reported status and exact task generation after the ack.
+  ACK_COMPLETED_TASKS=$(awk -F '\t' -v cutoff="$ACK_THROUGH" -v seqs="$ACK_ROWS_FILE" '
+    BEGIN { while ((getline line < seqs) > 0) owned[line]=1 }
+    NF >= 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff && ($2 in owned) \
+      && $3 == "signal" && $4 ~ /^[A-Za-z0-9._-]+\.status$/ {
+        id=$4; sub(/\.status$/, "", id); if (!seen[id]++) print id
+      }
+  ' "$FM_WAKE_QUEUE") || ACK_COMPLETED_TASKS=
   DRAIN_TMP=$(mktemp "$STATE/.wake-queue.ack.XXXXXX") || exit 1
   chmod 0600 "$DRAIN_TMP" || exit 1
   if [ "$ACTOR" = branch ]; then
@@ -945,6 +960,10 @@ if [ -n "$ACK_THROUGH" ]; then
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
+  for completed_task in $ACK_COMPLETED_TASKS; do
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      bash "$SCRIPT_DIR/fm-supervision-settle.sh" "$completed_task" >/dev/null 2>&1 || true
+  done
   if [ "$ACK_REMOVED" -eq 0 ] && [ "$PRESENTED_MAX" -gt "$ACK_THROUGH" ]; then
     # Nothing at or below the cutoff was this actor's to consume, while a
     # presented row above it is still waiting: the caller acknowledged an

@@ -2,7 +2,8 @@
 name: quiet
 description: >-
   Enter quiet supervision mode when the captain invokes /quiet or asks for quiet mode, quiet-while-present, or fewer routine wake turns while they stay in the session.
-  Where Pi's supervision branch or an attended supervision host already keeps routine wakes off the conversation, it enters nothing and says so.
+  On Pi it uses the native /quiet command to retain routine outcomes in the store without injecting them into main's conversation.
+  Where an attended supervision host already keeps routine wakes off the conversation, it enters nothing and says so.
   Elsewhere it sets the same durable away/quiet-mode flag as /afk, in `quiet` mode, so the sub-supervisor daemon self-handles routine wakes and escalates captain-relevant events exactly as away mode does, but ordinary captain chat does NOT exit it - only an explicit `/quiet off` does.
 user-invocable: true
 metadata:
@@ -22,7 +23,14 @@ For captain-held rechecks under quiet, see [architecture](../../../docs/architec
 ## What it does
 
 0. **First check whether quiet mode needs anything here.**
-   On Pi or pi-signed, enter nothing: the attended branch already keeps routine wakes out of this conversation (the `afk` skill's step 2); tell the captain so.
+   On Pi or pi-signed, the native `/quiet` command owns entry and `/quiet off` owns exit.
+   It persists the home-local `state/.pi-quiet` flag independently of away posture.
+   Routine outcomes remain available through `fm_branch_outcomes` without entering main's model context; captain outcomes still reach main immediately.
+   Ordinary chat and session reload preserve this choice.
+   Background branch requests still run, so explain that quiet reduces routine presentation and context growth rather than stopping supervision or guaranteeing a token budget.
+   Do not enter the away lifecycle for Pi quiet mode.
+   If the native command is unavailable, report that this extension version needs updating instead of claiming quiet is already active.
+   This completes the Pi path; steps 1 and 2 below apply only to other harnesses.
    Everywhere else run `bin/fm-afk-launch.sh quiet-check`; its header's QUIET MODE owns what each result means.
    - Exit 0: enter nothing - no record, no flag, no daemon, and `/quiet off` then needs nothing either.
      Tell the captain in `AGENTS.md` section 9 language that supervision here already works that way: routine fleet events stay off this conversation, while decisions, failures, credentials, and review-ready work still reach them.
@@ -54,7 +62,9 @@ Unlike `/afk`, ordinary chat is never the exit signal - that is the entire
 point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
 
 - Only an explicit `/quiet off` (or the captain plainly asking to leave quiet
-  mode / resume normal supervision) exits it: run `bin/fm-afk-return.sh`
+  mode / resume normal supervision) exits it.
+  On Pi use the native command, which removes only `state/.pi-quiet` and restores future routine notes.
+  On other harnesses run `bin/fm-afk-return.sh`
   unchanged, exactly the procedure `/afk`'s "How to exit afk" section
   documents for its own return path (correct-ordered daemon shutdown,
   durable wake presentation and acknowledgement, escalation/wedge evidence,
