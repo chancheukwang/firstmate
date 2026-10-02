@@ -6611,6 +6611,36 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
+test_away_handled_wait_absorbs_heartbeat_but_new_failure_wakes() {
+  local dir state pid out i
+  dir=$(make_case away-handled-wait)
+  state="$dir/state"
+  out="$dir/watch.out"
+  printf 'kind=ship\nmode=no-mistakes\nworktree=%s\n' "$dir" > "$state/task.meta"
+  printf 'paused: external review pending\n' > "$state/task.status"
+  prime_status_seen "$state" "$state/task.status"
+  date +%s > "$state/.afk"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · external review pending' \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 \
+    FM_SECONDMATE_LIVENESS_SECS=99999999 "$WATCH" > "$out" 2> "$dir/watch.err" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$state/.heartbeat-streak" ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.heartbeat-streak" ] || fail "handled wait never reached a heartbeat scan: $(cat "$out" "$dir/watch.err")"
+  kill -0 "$pid" 2>/dev/null || fail "unchanged handled wait woke the model: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "unchanged handled wait queued a wake"
+  printf 'failed: review service rejected the work\n' >> "$state/task.status"
+  wait_for_exit "$pid" 100 || fail "new failure after handled wait did not wake supervision"
+  grep -F 'signal:' "$out" >/dev/null || fail "new failure did not surface as a signal"
+  pass "away watcher absorbs unchanged handled wait heartbeats and surfaces a new failure"
+}
+
 # CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2
 # churn-deferral regression. The rest of this file is not a 3.2 snapshot suite.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -6745,6 +6775,7 @@ test_procevent_surface_serializes_with_drain
 test_procevent_surface_crash_boundaries
 test_procevent_marker_failure_exits_and_replays
 test_heartbeat_no_change_absorbed
+test_away_handled_wait_absorbs_heartbeat_but_new_failure_wakes
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing

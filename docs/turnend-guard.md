@@ -72,12 +72,18 @@ It also requires `AGENTS.md`, `bin/`, and the effective state directory.
 
 ### Supervision need
 
-For an in-scope primary, the guard counts in-flight work from `state/*.meta`.
+For an in-scope primary, the guard counts task metadata without a valid handled-completion receipt as in-flight work.
+A task may keep its `state/*.meta`, report, worktree, and sidebar entry after delivery without keeping model supervision active.
+`bin/fm-supervision-settle.sh` owns completion acceptance, and `bin/fm-supervision-lib.sh` owns the shared receipt predicate used by the guard and watcher.
+A receipt applies only to the same metadata, status, and turn-end generation, with no pending task wake or instruction and no resumed worker or validation activity.
+Normal wake acknowledgement attempts settlement automatically; the watcher retries previously reported completions without a model request when validation finishes later.
+An unverified delivery, active validation, failed task, or unresolved waiting state does not become a completed task merely because its last status says `done` or its endpoint stopped.
 These sources also count toward supervision need:
 
 - Registered `state/procevent/*.source` records require supervision even though they have no task metadata.
 - Every mode treats `state/x-watch.check.sh` as supervision need, so Relay polling remains guarded without an in-flight task.
 - A custom check registered with `bin/fm-check-register.sh` counts the same way, so an operator's home-level poll keeps running after the last task is torn down.
+- A settled task's retained PR poll remains a passive supervision source until the poll retires, so a later merge or check outcome still reaches the normal wake path.
 
 The default cross-harness mode exits silently with no supervision need.
 

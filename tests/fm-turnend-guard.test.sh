@@ -175,6 +175,66 @@ test_predicate_relay_shim_is_not_a_custom_check() {
 }
 
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
+
+test_completed_acknowledged_task_goes_quiet_and_new_event_rearms() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/completed-acknowledged")
+  mkdir -p "$dir/data/task1"
+  printf 'kind=scout\nworktree=%s\n' "$dir" > "$dir/state/task1.meta"
+  printf 'done: delivered report=data/task1/report.md\n' > "$dir/state/task1.status"
+  printf 'report\n' > "$dir/data/task1/report.md"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "unacknowledged completion must keep supervision"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_wake_status_mark_current "$2" "$2/task1.status"' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" \
+    || fail "could not mark completed status as presented"
+  FM_HOME="$dir" bash "$ROOT/bin/fm-supervision-settle.sh" task1 \
+    || fail "acknowledged delivered scout did not settle"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "acknowledged completion must no longer force model supervision"
+  [ -z "$out" ] || fail "settled completion produced a guard prompt: $out"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/state/task1.check.sh"
+  : > "$dir/state/task1.pr-poll"
+  fm_supervision_status "$dir/state"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] && [ "$FM_SUP_CHECKS" -eq 1 ] && [ "$FM_SUP_NEEDED" = true ] \
+    || fail "settled task PR poll did not remain a passive supervision source"
+  rm -f "$dir/state/task1.check.sh" "$dir/state/task1.pr-poll"
+  printf 'working: new request\n' >> "$dir/state/task1.status"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "new status event must reactivate supervision"
+  pass "acknowledged completion becomes quiet; a new status event reactivates it"
+}
+
+test_old_done_cannot_settle_unfinished_pipeline() {
+  local dir status
+  dir=$(make_primary_dir "$TMP_ROOT/unfinished-pipeline")
+  printf 'kind=ship\nmode=no-mistakes\nworktree=%s\n' "$dir" > "$dir/state/task1.meta"
+  printf 'done: pre-validation handoff\n' > "$dir/state/task1.status"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_wake_status_mark_current "$2" "$2/task1.status"' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" \
+    || fail "could not mark pipeline status as presented"
+  FM_HOME="$dir" bash "$ROOT/bin/fm-supervision-settle.sh" task1 >/dev/null 2>&1; status=$?
+  [ "$status" -ne 0 ] || fail "old done status settled an unverified pipeline"
+  [ ! -e "$dir/state/.supervision-settled/task1" ] || fail "refused pipeline left a receipt"
+  pass "a pre-validation done line cannot settle an unfinished no-mistakes run"
+}
+
+test_settlement_rejects_symlink_receipt_directory() {
+  local dir outside status
+  dir=$(make_primary_dir "$TMP_ROOT/symlink-receipt")
+  outside="$TMP_ROOT/symlink-receipt-outside"
+  mkdir -p "$dir/data/task1" "$outside"
+  printf 'kind=scout\nworktree=%s\n' "$dir" > "$dir/state/task1.meta"
+  printf 'done: delivered report=data/task1/report.md\n' > "$dir/state/task1.status"
+  printf 'report\n' > "$dir/data/task1/report.md"
+  printf 'sentinel\n' > "$outside/task1"
+  ln -s "$outside" "$dir/state/.supervision-settled"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_wake_status_mark_current "$2" "$2/task1.status"' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" \
+    || fail "could not mark symlink fixture status as presented"
+  FM_HOME="$dir" bash "$ROOT/bin/fm-supervision-settle.sh" task1 >/dev/null 2>&1; status=$?
+  [ "$status" -ne 0 ] || fail "settlement followed a symlink receipt directory"
+  [ "$(cat "$outside/task1")" = sentinel ] || fail "settlement changed the outside sentinel"
+  fm_supervision_needed "$dir/state" || fail "symlink receipt silenced an active task"
+  pass "a symlink receipt directory cannot redirect or fake settlement"
+}
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
 # under bin/, so the hook (invoked by absolute path) resolves its own FM_ROOT to
@@ -190,6 +250,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  [ ! -f "$ROOT/bin/fm-supervision-settle.sh" ] || cp "$ROOT/bin/fm-supervision-settle.sh" "$dir/bin/fm-supervision-settle.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/bin/fm-supervision-engine-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
@@ -2208,6 +2269,9 @@ test_predicate_registered_check_survives_rebinding_drift
 test_predicate_unregistered_check_needs_nothing
 test_predicate_task_pr_poll_is_not_a_custom_check
 test_predicate_relay_shim_is_not_a_custom_check
+test_completed_acknowledged_task_goes_quiet_and_new_event_rearms
+test_old_done_cannot_settle_unfinished_pipeline
+test_settlement_rejects_symlink_receipt_directory
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home

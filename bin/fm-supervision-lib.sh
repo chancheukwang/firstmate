@@ -21,9 +21,74 @@ fm_sup_stat_mtime() {
   fi
 }
 
+# A handled completion stays dormant only for the exact task generation that
+# was acknowledged. A changed status, turn, metadata, or pending steer wakes it.
+fm_sup_task_signature() {  # <state> <task-id>
+  local state=$1 id=$2 meta="$1/$2.meta" status="$1/$2.status" turn="$1/$2.turn-ended" sig
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ -f "$status" ] && [ ! -L "$status" ] || return 1
+  sig="$(cksum < "$meta")|$(cksum < "$status")" || return 1
+  if [ -e "$turn" ] || [ -L "$turn" ]; then
+    [ -f "$turn" ] && [ ! -L "$turn" ] || return 1
+    sig="$sig|$(cksum < "$turn")" || return 1
+  else
+    sig="$sig|-"
+  fi
+  printf 'v1|%s\n' "$sig"
+}
+
+fm_sup_task_has_unhandled_event() {  # <state> <task-id>
+  local state=$1 id=$2 msg window
+  for msg in "$state/$id.inbox"/*.msg; do
+    [ -e "$msg" ] || [ -L "$msg" ] || continue
+    return 0
+  done
+  window=$(sed -n 's/^window=//p' "$state/$id.meta" 2>/dev/null | tail -1)
+  [ -s "$state/.wake-queue" ] || return 1
+  awk -F '\t' -v status="$id.status" -v turn="$id.turn-ended" -v window="$window" '
+    $3 == "signal" && ($4 == status || $4 == turn) { found=1; exit }
+    $3 == "stale" && window != "" && $4 == window { found=1; exit }
+    END { exit !found }
+  ' "$state/.wake-queue"
+}
+
+fm_sup_task_settled() {  # <state> <task-id>
+  local state=$1 id=$2 receipt="$1/.supervision-settled/$2" current kind mode home crew_bin crew
+  [ -d "$state/.supervision-settled" ] && [ ! -L "$state/.supervision-settled" ] || return 1
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  current=$(fm_sup_task_signature "$state" "$id") || return 1
+  [ "$(cat "$receipt" 2>/dev/null)" = "$current" ] || return 1
+  fm_sup_task_has_unhandled_event "$state" "$id" && return 1
+  if [ "${FM_SUP_CYCLE_CACHE:-0}" = 1 ]; then
+    case "${FM_SUP_CYCLE_SETTLED:-}" in
+      *$'\n'"$id"$'\t'"$current"$'\n'*) return 0 ;;
+    esac
+  fi
+  kind=$(sed -n 's/^kind=//p' "$state/$id.meta" | tail -1)
+  if [ "$kind" = ship ] || { [ "$kind" = scout ] \
+    && grep -Eq '^(window|terminal)=.+' "$state/$id.meta"; }; then
+    mode=$(sed -n 's/^mode=//p' "$state/$id.meta" | tail -1)
+    home=${FM_HOME:-${state%/state}}
+    crew_bin="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-crew-state.sh"
+    [ -f "$crew_bin" ] || return 1
+    crew=$(FM_CREW_STATE_NO_FORGE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$crew_bin" "$id" 2>/dev/null) || return 1
+    case "$mode:$crew" in
+      no-mistakes:'state: done · source: run-step · '*) ;;
+      direct-PR:'state: done · '*|local-only:'state: done · '*) ;;
+      direct-PR:'state: unknown · source: none · backend target gone:'*|local-only:'state: unknown · source: none · backend target gone:'*) ;;
+      *:'state: done · '*) [ "$kind" = scout ] || return 1 ;;
+      *:'state: unknown · source: none · backend target gone:'*) [ "$kind" = scout ] || return 1 ;;
+      *) return 1 ;;
+    esac
+  fi
+  if [ "${FM_SUP_CYCLE_CACHE:-0}" = 1 ]; then
+    FM_SUP_CYCLE_SETTLED="${FM_SUP_CYCLE_SETTLED:-}"$'\n'"$id"$'\t'"$current"$'\n'
+  fi
+  return 0
+}
+
 # fm_supervision_status <state-dir> [grace-seconds]
 # Populates, for the state dir at $1:
-#   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
+#   FM_SUP_IN_FLIGHT      count of task metadata without a matching settled receipt
 #   FM_SUP_SOURCES        count of registered process-to-event sources
 #   FM_SUP_CHECKS         count of registered custom checks: a state/<id>.check.sh
 #                         with the state/<id>.check-trust binding that
@@ -54,6 +119,9 @@ fm_supervision_status() {
 
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    fm_sup_task_settled "$state" "$id" && continue
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
   done
   FM_SUP_SOURCES=0
@@ -69,7 +137,12 @@ fm_supervision_status() {
     if [ "$id" = x-watch ]; then
       continue
     fi
-    [ -e "$state/$id.check-trust" ] || continue
+    if [ ! -e "$state/$id.check-trust" ]; then
+      # A completed worker's PR poll is still a passive source of new events.
+      if [ ! -e "$state/$id.pr-poll" ] || ! fm_sup_task_settled "$state" "$id"; then
+        continue
+      fi
+    fi
     FM_SUP_CHECKS=$((FM_SUP_CHECKS + 1))
   done
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \

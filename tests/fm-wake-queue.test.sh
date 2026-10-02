@@ -18,6 +18,122 @@ GUARD="$ROOT/bin/fm-guard.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
+test_ack_settles_only_the_consumed_completion_generation() {
+  local dir state seq generation
+  dir=$(make_case settled-completion)
+  state="$dir/state"
+  mkdir -p "$dir/data/task"
+  printf 'kind=scout\nworktree=%s\n' "$dir" > "$state/task.meta"
+  printf 'done: delivered report=data/task/report.md\n' > "$state/task.status"
+  printf 'report\n' > "$dir/data/task/report.md"
+  prime_status_seen "$state" "$state/task.status"
+  append_wake "$state" signal task.status "signal: $state/task.status" || fail "completion signal append failed"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+    || fail "completion drain failed"
+  [ ! -e "$state/.supervision-settled/task" ] || fail "presentation alone settled completion"
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/drain.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/drain.err")
+  [ -n "$seq" ] && [ -n "$generation" ] || fail "completion drain did not offer acknowledgement"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation" \
+    || fail "completion acknowledgement failed"
+  [ -f "$state/.supervision-settled/task" ] || fail "completion ack did not create a receipt"
+  # A new event is not part of the old acknowledgement even if it arrives
+  # before the supervisor next polls the worker.
+  printf 'working: follow-up\n' >> "$state/task.status"
+  if FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_sup_task_settled "$2" task' _ \
+    "$ROOT/bin/fm-supervision-lib.sh" "$state"; then
+    fail "a new status event remained settled by the old acknowledgement"
+  fi
+  pass "wake acknowledgement settles only its completed task generation"
+}
+
+test_ack_settles_delivered_ship_with_exited_endpoint() {
+  local dir state project worker seq generation current
+  dir=$(make_case settled-ship)
+  state="$dir/state"
+  project="$dir/project"
+  worker="$dir/worker"
+  fm_git_identity
+  git init -q "$project"
+  git -C "$project" commit -q --allow-empty -m delivered
+  git clone -q "$project" "$worker"
+  printf 'kind=ship\nmode=local-only\nharness=pi\nbackend=tmux\nwindow=test:fm-ship\nproject=%s\nworktree=%s\n' \
+    "$project" "$worker" > "$state/ship.meta"
+  printf 'done: delivered commit in project clone\n' > "$state/ship.status"
+  current=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    bash "$ROOT/bin/fm-crew-state.sh" ship)
+  assert_contains "$current" 'backend target gone:' 'fixture must prove the worker endpoint exited'
+  prime_status_seen "$state" "$state/ship.status"
+  append_wake "$state" signal ship.status "signal: $state/ship.status" || fail "ship completion signal append failed"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+    || fail "ship completion drain failed"
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/drain.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/drain.err")
+  [ -n "$seq" ] && [ -n "$generation" ] || fail "ship completion drain did not offer acknowledgement"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" \
+    --ack-through "$seq" --recovery-generation "$generation" || fail "ship acknowledgement failed"
+  [ -f "$state/.supervision-settled/ship" ] || fail "delivered ship was not settled after acknowledgement"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" bash -c '. "$1"; fm_sup_task_settled "$2" ship' _ \
+    "$ROOT/bin/fm-supervision-lib.sh" "$state" || fail "exited, delivered ship receipt was not honored"
+  pass "wake acknowledgement settles a delivered ship whose endpoint already exited"
+}
+
+test_busy_scout_cannot_settle_from_old_done_report() {
+  local dir state current status
+  dir=$(make_supercase busy-scout-settlement)
+  state="$dir/state"
+  mkdir -p "$dir/data/scout"
+  printf 'kind=scout\nharness=pi\nbackend=tmux\nwindow=test:fm-scout\nworktree=%s\n' "$dir" > "$state/scout.meta"
+  printf 'done: delivered report=data/scout/report.md\n' > "$state/scout.status"
+  printf 'report\n' > "$dir/data/scout/report.md"
+  printf 'testgen\n' > "$state/scout.busy-gen"
+  printf 'v1 gen=testgen seq=1 state=busy source=pi-ext event=agent_start ts=%s\n' "$(date +%s)" > "$state/scout.busy-state"
+  prime_status_seen "$state" "$state/scout.status"
+  current=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    bash "$ROOT/bin/fm-crew-state.sh" scout)
+  assert_contains "$current" 'state: working' 'busy scout fixture must be working'
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    bash "$ROOT/bin/fm-supervision-settle.sh" scout >/dev/null 2>&1; status=$?
+  [ "$status" -ne 0 ] || fail "old done and report settled an active scout"
+  [ ! -e "$state/.supervision-settled/scout" ] || fail "busy scout left a receipt"
+  pass "a scout still busy after an old done report stays supervised"
+}
+
+test_watcher_retries_handled_completion_without_new_status() {
+  local dir state seq generation pid i
+  dir=$(make_case settled-later)
+  state="$dir/state"
+  mkdir -p "$dir/data/scout"
+  printf 'kind=scout\nworktree=%s\n' "$dir" > "$state/scout.meta"
+  printf 'done: delivered report=data/scout/report.md\n' > "$state/scout.status"
+  prime_status_seen "$state" "$state/scout.status"
+  append_wake "$state" signal scout.status "signal: $state/scout.status" || fail "late completion signal append failed"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+    || fail "late completion drain failed"
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/drain.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/drain.err")
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation" \
+    || fail "late completion acknowledgement failed"
+  [ ! -e "$state/.supervision-settled/scout" ] || fail "completion settled before delivery evidence existed"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    FM_SETTLE_RETRY_SECS=0 FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" 2> "$dir/watch.err" &
+  pid=$!
+  printf 'report\n' > "$dir/data/scout/report.md"
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -f "$state/.supervision-settled/scout" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ -f "$state/.supervision-settled/scout" ] \
+    || fail "watcher did not settle the handled completion after evidence arrived: $(cat "$dir/watch.out" "$dir/watch.err")"
+  [ "$(cat "$state/scout.status")" = 'done: delivered report=data/scout/report.md' ] \
+    || fail "retry test unexpectedly changed the worker status"
+  pass "watcher settles a handled completion when external evidence arrives without a new status"
+}
+
 
 test_concurrent_append_and_drain() {
   local dir state out1 out2 pids i pid count unique malformed sequence generation
@@ -3393,6 +3509,10 @@ test_folded_worker_resolved_is_not_owned_lag
 test_owned_growth_still_annotates_turn_ended
 test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
+test_ack_settles_only_the_consumed_completion_generation
+test_ack_settles_delivered_ship_with_exited_endpoint
+test_busy_scout_cannot_settle_from_old_done_report
+test_watcher_retries_handled_completion_without_new_status
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
 test_not_working_stale_enqueue_before_suppressor
