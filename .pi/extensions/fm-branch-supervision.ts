@@ -132,6 +132,7 @@ import {
   classifyFirstmateOperationalText,
   encodeFirstmateOperationalInputWith,
 } from "./lib/fm-operational-input.ts";
+import { FM_MAIN_PROVIDER_RECOVERED_EVENT, readProviderCooldown } from "./lib/fm-main-provider-cooldown.ts";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
@@ -1076,6 +1077,7 @@ export default function (pi: ExtensionAPI) {
       processing = null;
       return true;
     }
+    if (readProviderCooldown(join(state, ".pi-main-provider-cooldown"), mainModel)) return true;
     const through = rows[rows.length - 1].seq;
     const sequences = rows.map((row) => row.seq).join(",");
     if (processing?.pending) return true;
@@ -1093,6 +1095,7 @@ export default function (pi: ExtensionAPI) {
       processing = null;
       return true;
     }
+    if (readProviderCooldown(join(state, ".pi-main-provider-cooldown"), mainModel)) return true;
     if (processing?.pending) return true;
     if (!processing || processing.sequences !== sequences) {
       processing = { sequences, through, triggered: 0, pending: false, nextTurnQueued: false };
@@ -1785,6 +1788,12 @@ ${context.command}
     if (failed && startedGeneration === generation) {
       branchBroken = "could not reconcile unread supervision outcomes into main";
     }
+  });
+  pi.events?.on?.(FM_MAIN_PROVIDER_RECOVERED_EVENT, () => {
+    const recoveredGeneration = generation;
+    void enqueueDelivery(async () => {
+      if (await actingAsOwner(recoveredGeneration)) await presentUnprocessedOutcomes(recoveredGeneration);
+    });
   });
 
   // Pi emits this for /model, Ctrl+P cycling, and session restore, so it is

@@ -2429,6 +2429,33 @@ EOF
   pass "--reemit reprints the digest without repeating startup's mutating sweeps and still drains queued wakes"
 }
 
+test_pi_compaction_recovery_is_bounded_and_keeps_decisions() {
+  local rec root home fakebin startup compact repeat
+  rec=$(new_world pi-compact-bounded)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+  printf '%12000s\n' '' | tr ' ' A > "$home/data/captain.md"
+  printf 'needs-decision [at=1] [key=choice]: choose a safe path\n' > "$home/state/task-c.status"
+  append_wake "$home/state" signal task-c "needs-decision: choose a safe path" || fail "seed decision wake failed"
+  startup=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup)
+  compact=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  repeat=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_contains "$compact" "COMPACTION RECOVERY" "Pi compact did not use the bounded recovery path"
+  assert_contains "$compact" "WAKE_ACK_REQUIRED" "Pi compact lost the generation-bound wake acknowledgement"
+  assert_contains "$compact" "choice" "Pi compact lost the open decision"
+  assert_not_contains "$compact" "AAAAAAA" "Pi compact re-injected stable captain memory"
+  [ "${#compact}" -lt "$(( ${#startup} / 2 ))" ] \
+    || fail "Pi compact was not smaller than half the full startup (${#compact} vs ${#startup} chars)"
+  [ "${#repeat}" -le "$(( ${#compact} + 500 ))" ] \
+    || fail "repeated Pi compaction grew the rendered recovery (${#repeat} vs ${#compact} chars)"
+  printf 'Pi rendered prompt sizes: startup=%s compact=%s repeated-compact=%s chars\n' \
+    "${#startup}" "${#compact}" "${#repeat}"
+  pass "Pi compaction retains current decisions and acknowledgement with bounded repeated output"
+}
+
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact() {
   local rec root home fakebin startup compact_equal compact_first compact_second clear_out resume_out reset_out baseline baseline_after expected_hash refresh_line bootstrap_line
   rec=$(new_world agents-refresh)
@@ -3071,6 +3098,7 @@ test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
+test_pi_compaction_recovery_is_bounded_and_keeps_decisions
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
 test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh

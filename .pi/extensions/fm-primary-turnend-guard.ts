@@ -9,6 +9,7 @@ import {
   encodeFirstmateOperationalInput,
   firstmateShellInvocation,
 } from "./lib/fm-operational-input.ts";
+import { FM_MAIN_PROVIDER_COOLDOWN_EVENT, FM_MAIN_PROVIDER_RECOVERED_EVENT, clearProviderCooldown, providerFailureCooldown, readProviderCooldown, writeProviderCooldown } from "./lib/fm-main-provider-cooldown.ts";
 
 let guardFollowupActive = false;
 
@@ -18,7 +19,11 @@ const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
 const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
+const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
+const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
+const modelPinFile = `${config}/pi-main-model`;
+const cooldownFile = `${state}/.pi-main-provider-cooldown`;
 const marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
@@ -57,6 +62,34 @@ function lockOwnership(): LockOwnership {
 function markLoaded(): void {
   if (!existsSync(state) || lockOwnership() === "other") return;
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+}
+
+function primaryScope(): boolean {
+  if (process.env.FM_TASK_ID) return false;
+  const result = spawnSync("bash", ["-c", '. "$1"; fm_primary_scope_matches "$2" "$3"', "bash",
+    `${fmRoot}/bin/fm-primary-scope-lib.sh`, fmRoot, state], { stdio: "ignore" });
+  return result.status === 0;
+}
+
+function operatorSelectedAtLaunch(): boolean {
+  return process.argv.slice(1).some((arg, index, args) =>
+    arg === "--model" || arg.startsWith("--model=") || arg === "-m" ||
+    (arg === "--thinking" && index + 1 < args.length) || arg.startsWith("--thinking="));
+}
+
+function mainModelPin(): { provider: string; id: string; thinking: string } | null {
+  let value: string;
+  try { value = readFileSync(modelPinFile, "utf8"); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const lines = value.trim().split(/\r?\n/);
+  if (lines.length !== 2 || !/^[^/\s]+\/.+$/.test(lines[0]) ||
+      !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(lines[1])) {
+    throw new Error(`invalid ${modelPinFile}: expected provider/model-id and thinking level on separate lines`);
+  }
+  const separator = lines[0].indexOf("/");
+  return { provider: lines[0].slice(0, separator), id: lines[0].slice(separator + 1), thinking: lines[1] };
 }
 
 // Pi's session_start reasons are startup | reload | new | resume | fork, and a
@@ -509,6 +542,39 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
+  let operatorSelected = operatorSelectedAtLaunch();
+  let applyingPin = false;
+  let scopedPrimary = false;
+  pi.on?.("model_select", (event) => {
+    if (!applyingPin && event.source !== "restore") operatorSelected = true;
+  });
+  pi.on?.("agent_end", (event, ctx) => {
+    if (!scopedPrimary || lockOwnership() !== "owned") return;
+    const model = ctx.model;
+    if (!model) return;
+    const assistant = [...event.messages].reverse().find((message) => message.role === "assistant");
+    if (!assistant) return;
+    if (assistant.stopReason === "aborted") return;
+    if (assistant.stopReason !== "error") {
+      try {
+        if (clearProviderCooldown(cooldownFile, model)) pi.events?.emit?.(FM_MAIN_PROVIDER_RECOVERED_EVENT, {});
+      } catch (error) { ctx.ui.notify(`Pi provider cooldown could not be cleared: ${String(error)}`, "warning"); }
+      return;
+    }
+    const previous = readProviderCooldown(cooldownFile, model, Date.now(), true);
+    const cooldown = providerFailureCooldown(assistant.errorMessage ?? "", previous);
+    if (!cooldown) return;
+    try {
+      writeProviderCooldown(cooldownFile, model, cooldown);
+      pi.events?.emit?.(FM_MAIN_PROVIDER_COOLDOWN_EVENT, {});
+      if (!previous) ctx.ui.notify(
+        `Pi ${cooldown.reason === "quota" ? "quota exhausted" : "provider unavailable"}. Automatic main wakes are held until ${new Date(cooldown.until).toISOString()}; queued work remains durable. A human prompt can retry sooner.`,
+        "warning",
+      );
+    } catch (error) {
+      ctx.ui.notify(`Pi provider cooldown could not be recorded: ${String(error)}`, "warning");
+    }
+  });
   let sessionstartGeneration: SessionstartGeneration | null = null;
   let sessionstartExitListenerRegistered = false;
   const cleanupSessionstartOnProcessExit = (): void => {
@@ -540,11 +606,34 @@ export default function (pi: ExtensionAPI) {
   };
   registerSessionstartExitListener();
 
-  pi.on?.("session_start", (event, ctx) => {
+  pi.on?.("session_start", async (event, ctx) => {
     const reason = String((event as { reason?: unknown }).reason ?? "");
     const source = reason === "startup"
       ? startupRebuildSource(ctx) ?? "startup"
       : { new: "clear", resume: "resume", fork: "fork" }[reason];
+    scopedPrimary = primaryScope();
+    if (scopedPrimary && (source === "startup" || source === "clear") && !operatorSelected) {
+      try {
+        const pin = mainModelPin();
+        if (pin) {
+          const model = ctx.modelRegistry.find(pin.provider, pin.id);
+          if (!model) throw new Error(`${pin.provider}/${pin.id} is absent from Pi's model catalog`);
+          applyingPin = true;
+          try {
+            if (!await pi.setModel(model)) throw new Error(`${pin.provider}/${pin.id} has no configured authentication`);
+            pi.setThinkingLevel(pin.thinking as ReturnType<ExtensionAPI["getThinkingLevel"]>);
+          } finally { applyingPin = false; }
+        }
+      } catch (error) {
+        // Pi 0.99.2 swallows extension hook throws and resets ctx.abort() before
+        // the provider call. Exit this primary session instead of sending the
+        // first prompt through whichever global default Pi had selected.
+        const failure = `Pi main model selection failed: ${error instanceof Error ? error.message : String(error)}`;
+        console.error(failure);
+        ctx.ui.notify(failure, "warning");
+        process.exit(1);
+      }
+    }
     markLoaded();
     if (!source) return;
     registerSessionstartExitListener();
@@ -600,14 +689,19 @@ export default function (pi: ExtensionAPI) {
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
   });
 
-  pi.on("agent_settled", async () => {
+  pi.on("agent_settled", async (_event, ctx) => {
     if (guardFollowupActive) {
       guardFollowupActive = false;
       return;
     }
 
+    // This repair is an automatic main request too. Keep the supervisor's
+    // safety records intact without probing a provider already in cooldown.
+    if (scopedPrimary && ctx.model && readProviderCooldown(cooldownFile, ctx.model)) return;
+
     const result = await runGuard();
     if (result.code !== 2) return;
+    if (scopedPrimary && ctx.model && readProviderCooldown(cooldownFile, ctx.model)) return;
 
     guardFollowupActive = true;
     try {

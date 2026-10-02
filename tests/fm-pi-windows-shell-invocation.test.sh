@@ -17,6 +17,7 @@ mkdir -p "$project/.pi/extensions/lib" "$project/bin" "$project/state"
 cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$project/.pi/extensions/"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
   "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$project/.pi/extensions/lib/"
+  cp "$ROOT/.pi/extensions/lib/fm-main-provider-cooldown.ts" "$project/.pi/extensions/lib/"
 
 cat >"$project/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash

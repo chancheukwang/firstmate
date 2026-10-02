@@ -30,7 +30,9 @@
 #                       mutating step runs.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
-#                       diagnostics always run. Bootstrap's six MUTATING sweeps
+#                       diagnostics run at startup and on lock refusal; a
+#                       verified, completed Pi compaction reuses that result.
+#                       Bootstrap's six MUTATING sweeps
 #                       (same-home backlog reconciliation,
 #                       secondmate convergence, secondmate liveness, pending remote
 #                       handoff retry, X-mode artifact writes, fleet sync) also run only when
@@ -124,7 +126,7 @@
 # shared mutable state.
 #
 # The tradeoff this ordering accepts: a refused (read-only) session must not
-# go dark. So on refusal, bootstrap still runs (in FM_BOOTSTRAP_DETECT_ONLY=1
+# go dark. So on refusal, including a compact re-emit, bootstrap still runs (in FM_BOOTSTRAP_DETECT_ONLY=1
 # mode) for its local read-only detect lines - missing tools, the worktree-tangle
 # check, the harness override, crew-dispatch validation, tasks-axi and quota-axi
 # tool checks, and tasks-axi availability - none of which mutate shared state
@@ -723,8 +725,10 @@ if [ "$READ_ONLY" -eq 0 ]; then
   # steer, or merge anyway, so it has no action left for an auth verdict to gate.
   NETWORK_STAGE_LOCKED=1
   [ "$REEMIT" -eq 0 ] || NETWORK_STAGE_LOCKED=0
-  "$SCRIPT_DIR/fm-startup-network.sh" start \
-    --locked "$NETWORK_STAGE_LOCKED" --harvest-pid $$ >/dev/null 2>&1 || true
+  if [ "$REEMIT" -ne 1 ] || [ "$SESSION_SOURCE" != compact ] || [ "$READ_ONLY" -eq 1 ]; then
+    "$SCRIPT_DIR/fm-startup-network.sh" start \
+      --locked "$NETWORK_STAGE_LOCKED" --harvest-pid $$ >/dev/null 2>&1 || true
+  fi
 fi
 
 # --- 2. bootstrap --------------------------------------------------------
@@ -733,7 +737,10 @@ fi
 # re-block this digest and race the worker's sweeps against themselves.
 stage bootstrap
 subsection "BOOTSTRAP"
-if [ "$READ_ONLY" -eq 1 ]; then
+BOOT_OUT=
+if [ "$REEMIT" -eq 1 ] && [ "$SESSION_SOURCE" = compact ] && [ "$READ_ONLY" -eq 0 ]; then
+  printf 'skipped - completed startup diagnostics stay in this session; the wake queue below is current.\n'
+elif [ "$READ_ONLY" -eq 1 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
     FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 elif [ "$REEMIT" -eq 1 ]; then
@@ -746,7 +753,9 @@ else
       "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1
   )
 fi
-if [ -n "$BOOT_OUT" ]; then
+if [ "$REEMIT" -eq 1 ] && [ "$SESSION_SOURCE" = compact ] && [ "$READ_ONLY" -eq 0 ]; then
+  :
+elif [ -n "$BOOT_OUT" ]; then
   printf '%s\n' "$BOOT_OUT"
 else
   printf '(silent - all good)\n'
@@ -844,6 +853,38 @@ fi
   --afk "$AFK_PRESENT" \
   --afk-mode "$AFK_MODE" \
   --x-mode "$X_MODE_PRESENT"
+
+# Pi keeps AGENTS.md as a session instruction and keeps a compaction summary.
+# The preceding lock read, wake drain (including open decisions and unread
+# status), and live supervision block are the recovery facts it must regain.
+# Reprinting historical task tails and stable home memory at each compaction
+# adds those same bytes to the next compaction input without adding new truth.
+if [ "$REEMIT" -eq 1 ] && [ "$SESSION_SOURCE" = compact ] && [ "$READ_ONLY" -eq 0 ]; then
+  stage fleet-state
+  section "COMPACTION RECOVERY"
+  printf 'The completed startup was already consumed in this Pi session.\n'
+  printf 'The wake queue above includes current open decisions and unread status.\n'
+  printf 'Task records below name active work; status logs are wake history, not current state.\n'
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    printf '%s: kind=%s project=%s window=%s\n' "$id" \
+      "$(fm_meta_get "$meta" kind)" "$(fm_meta_get "$meta" project)" "$(fm_meta_get "$meta" window)"
+  done
+  printf 'Targeted context: %s/data/{projects,secondmates,captain,captain-shared,learnings}.md.\n' "$FM_HOME"
+  printf 'Read a task body or current state only when this turn needs it.\n'
+  if [ -f "$STATE/.afk-contract" ]; then
+    printf 'Posture record present: read %s/state/.afk-contract before acting under away or quiet authority.\n' "$FM_HOME"
+  fi
+  if fm_pf_relay_active "$FM_HOME" \
+    && { fm_pf_has_registrations "$STATE" || fm_pf_has_events "$STATE"; }; then
+    PUBLIC_FOLLOWUP=$("$SCRIPT_DIR/fm-public-followup.sh" pending 2>/dev/null) || PUBLIC_FOLLOWUP=
+    [ -z "$PUBLIC_FOLLOWUP" ] || printf 'Public commitments:\n%s\n' "$PUBLIC_FOLLOWUP"
+  fi
+  stage next-step
+  printf 'Continue the active turn using the current wake drain and its exact WAKE_ACK_REQUIRED command.\n'
+  exit 0
+fi
 
 # --- 5. read-once contract -------------------------------------------------
 # Ahead of the two digests it governs, not after them: a truncated tail is

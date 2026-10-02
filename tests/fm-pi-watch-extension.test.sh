@@ -37,6 +37,7 @@ install_pi_watch_extension_fixture() {
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-main-provider-cooldown.ts" "$repo/.pi/extensions/lib/fm-main-provider-cooldown.ts"
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
   chmod +x "$repo/bin/fm-operational-input.sh"
@@ -4406,7 +4407,80 @@ EOF
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
+test_pi_provider_cooldown_holds_repeated_main_wakes() {
+  local repo home log stop out rc=0
+  repo="$TMP_ROOT/pi-main-cooldown-root"
+  home="$TMP_ROOT/pi-main-cooldown-home"
+  log="$TMP_ROOT/pi-main-cooldown.log"
+  stop="$TMP_ROOT/pi-main-cooldown.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm\n' >> "$FM_ARM_LOG"
+count=$(grep -c '^arm$' "$FM_ARM_LOG")
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=cooldown-%s\n' "$$" "$count"
+if [ "$count" -le 2 ]; then
+  printf 'signal: cooldown wake %s\n' "$count"
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+    FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" node --input-type=module 2>&1 <<'JS'
+import assert from "node:assert/strict";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const events = new Map();
+const handlers = new Map();
+const requests = [];
+const pi = {
+  on(name, handler) { handlers.set(name, handler); },
+  registerCommand() {},
+  registerTool() {},
+  async sendUserMessage(message) { requests.push(message); },
+  events: {
+    on(name, handler) { events.set(name, handler); },
+    emit() {},
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/.pi-main-provider-cooldown`,
+  `${JSON.stringify({ "openai-codex/gpt-6-sol": { until: Date.now() + 1_500, failures: 1, reason: "provider" } })}\n`);
+const { default: extension } = await import(pathToFileURL(process.env.PLUGIN).href);
+extension(pi);
+await handlers.get("session_start")({}, { model: { provider: "openai-codex", id: "gpt-6-sol" } });
+await new Promise((resolve) => setTimeout(resolve, 1200));
+assert.ok(readFileSync(process.env.FM_ARM_LOG, "utf8").match(/arm/g)?.length >= 2);
+assert.equal(requests.length, 0, "automatic wakes submitted provider requests during cooldown");
+await new Promise((resolve) => setTimeout(resolve, 500));
+assert.equal(requests.length, 1, "retry expiry sent more than one automatic probe");
+writeFileSync(`${process.env.FM_HOME}/state/.pi-main-provider-cooldown`,
+  `${JSON.stringify({ "openai-codex/gpt-6-sol": { until: Date.now() + 60_000, failures: 2, reason: "provider" } })}\n`);
+events.get("firstmate:pi-main-provider-cooldown")({});
+await new Promise((resolve) => setTimeout(resolve, 150));
+assert.equal(requests.length, 1, "renewed failure released another automatic request");
+unlinkSync(`${process.env.FM_HOME}/state/.pi-main-provider-cooldown`);
+events.get("firstmate:pi-main-provider-recovered")({});
+await new Promise((resolve) => setTimeout(resolve, 500));
+assert.equal(requests.length, 2, "recovery lost or duplicated pending wakes");
+events.get("firstmate:pi-main-provider-recovered")({});
+await new Promise((resolve) => setTimeout(resolve, 100));
+assert.equal(requests.length, 2, "a repeated recovery signal duplicated wake delivery");
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+console.log("ok - repeated failure wakes submit zero requests during cooldown and recover once each");
+JS
+  ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "Pi main cooldown request-count behavior failed: $out"
+  printf '%s\n' "$out"
+}
+
 test_pi_extension_reports_external_healthy_watcher
+test_pi_provider_cooldown_holds_repeated_main_wakes
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop

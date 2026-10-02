@@ -199,6 +199,19 @@ The branch prompt's "Verdict: routine or captain" section owns the distinction b
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns main's event ownership, acknowledgement duty, and conversational treatment for merged outcomes, while the persisted entry itself owns captain visibility.
 A task-level routine no-change outcome or a no-change heartbeat explicitly reported with `silent=true` is delivered without a rendered note; the branch prompt owns task-level eligibility, and every other routine outcome still appends a rendered, sailboat-prefixed note.
 
+## Pi main model (config/pi-main-model)
+
+An optional private `config/pi-main-model` file selects the model and thinking level for this home's Pi main supervisor at a fresh session start.
+Put `provider/model-id` on the first line and a Pi thinking level on the second line.
+The file is gitignored, affects neither ordinary Pi outside this Firstmate home nor task worktrees, and leaves the separately configured supervision branch alone.
+An explicit `--model` or `--thinking` launch choice and a model selected by the operator during this Pi session take precedence.
+An invalid or unavailable pin exits that Pi primary session with a diagnostic before any model request.
+The active session keeps its model when the file changes; start a fresh Pi session to apply a changed pin.
+
+When the main Pi provider returns a recognized quota, HTML, network, or service failure, the home-local cooldown record holds automatic main wake requests until its bounded retry time or a later provider reset horizon.
+The watcher retains those wakes in its existing durable queue, sends one recovery probe when the timer expires, and resumes the rest only after a successful model turn.
+Direct human prompts remain available during the cooldown.
+
 ## Pi supervision branch model and effort (config/supervision-branch-model, config/supervision-branch-effort)
 
 The branch can run on a cheaper model than main because supervision is an easier job than the captain's own conversation.

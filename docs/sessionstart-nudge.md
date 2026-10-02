@@ -68,7 +68,7 @@ A re-emit (`--reemit`) reprints the digest for a process that already has the he
 | Source | Action | Why |
 | --- | --- | --- |
 | `startup`, `new` | Full digest | This is a true session start that has not taken the helm; Pi CLI continuations are refined to `resume` by the adapter before reaching this boundary. |
-| `clear`, `compact` | `--reemit` after a proven complete startup, otherwise full digest | This process normally has the helm and lost only its context, but an earlier hook may have been truncated after acquiring the lock. |
+| `clear`, `compact` | `--reemit` after a proven complete startup, otherwise full digest | A completed Pi compaction reprints the lock, current wake drain, operating block, and bounded task identities while retaining the original startup in its session history. |
 | `resume`, `reload`, `fork` | Delegate to the nudge wrapper | Prior context is restored, so re-running is redundant when the lock is still ours and an instruction is enough when a new process resumed an old session. |
 | unreadable or unrecognized | Full digest | Taking the helm redundantly is cheap and idempotent; not taking it is the bug this tier exists to fix. |
 
@@ -117,6 +117,7 @@ The requested session start remains idempotent.
 - Which work a re-emit skips.
 - Its true-start AGENTS.md baseline.
 - Its supported stale-instruction refresh pairs.
+- The smaller Pi compaction recovery output and its current open-decision and wake presentation.
 
 The `bin/fm-session-start.sh` header is the single owner of those mechanics.
 

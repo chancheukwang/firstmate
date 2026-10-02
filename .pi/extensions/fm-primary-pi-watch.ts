@@ -54,6 +54,7 @@ import {
   FIRSTMATE_CALM_PRESENTATION_EVENT,
 } from "./lib/fm-calm-visibility.ts";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
+import { FM_MAIN_PROVIDER_COOLDOWN_EVENT, FM_MAIN_PROVIDER_RECOVERED_EVENT, readProviderCooldown, type ProviderSelection } from "./lib/fm-main-provider-cooldown.ts";
 
 type ArmResult = {
   ok: boolean;
@@ -103,6 +104,9 @@ type SessionGeneration = {
   child: ChildProcess | null;
   retryTimer: ReturnType<typeof setTimeout> | null;
   cleanupTimer: ReturnType<typeof setTimeout> | null;
+  cooldownTimer: ReturnType<typeof setTimeout> | null;
+  cooldownDeferredTokens: Set<string>;
+  cooldownProbeToken: string | null;
   retryFailures: number;
   restoring: boolean;
   seq: number;
@@ -148,6 +152,7 @@ const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const handoffDir = `${state}/extensions/pi-primary-watch`;
+const mainProviderCooldownFile = `${state}/.pi-main-provider-cooldown`;
 const actionableHandoff = `${handoffDir}/session-replacement-actionable.json`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
@@ -460,6 +465,9 @@ function createGeneration(): SessionGeneration {
     child: null,
     retryTimer: null,
     cleanupTimer: null,
+    cooldownTimer: null,
+    cooldownDeferredTokens: new Set(),
+    cooldownProbeToken: null,
     retryFailures: 0,
     restoring: false,
     seq: 0,
@@ -482,8 +490,10 @@ function relinquishGeneration(generation: SessionGeneration): void {
   generation.stopping = true;
   if (generation.retryTimer) clearTimeout(generation.retryTimer);
   if (generation.cleanupTimer) clearTimeout(generation.cleanupTimer);
+  if (generation.cooldownTimer) clearTimeout(generation.cooldownTimer);
   generation.retryTimer = null;
   generation.cleanupTimer = null;
+  generation.cooldownTimer = null;
   if (generation.child) retiringGenerations.add(generation);
 }
 
@@ -550,7 +560,48 @@ process.once("exit", cleanupOnProcessExit);
 
 export default function (pi: ExtensionAPI) {
   let generation = createGeneration();
+  let mainModel: ProviderSelection | null = null;
   activateGeneration(generation);
+  function scheduleProviderRetry(owner: SessionGeneration): void {
+    const cooldown = readProviderCooldown(mainProviderCooldownFile, mainModel);
+    if (!cooldown || owner.cooldownTimer || !generationIsLive(owner)) return;
+    const timer = setTimeout(() => {
+      if (owner.cooldownTimer === timer) owner.cooldownTimer = null;
+      if (!generationIsLive(owner)) return;
+      if (readProviderCooldown(mainProviderCooldownFile, mainModel)) {
+        scheduleProviderRetry(owner);
+        return;
+      }
+      const first = owner.cooldownDeferredTokens.values().next().value;
+      if (first) {
+        owner.cooldownDeferredTokens.delete(first);
+        owner.cooldownProbeToken = first;
+        void processPendingActionables(owner);
+      }
+    }, Math.min(2_147_483_647, Math.max(1, cooldown.until - Date.now())));
+    timer.unref();
+    owner.cooldownTimer = timer;
+  }
+  pi.events?.on?.(FM_MAIN_PROVIDER_COOLDOWN_EVENT, () => {
+    generation.cooldownProbeToken = null;
+    scheduleProviderRetry(generation);
+  });
+  pi.events?.on?.(FM_MAIN_PROVIDER_RECOVERED_EVENT, () => {
+    if (!generationIsLive(generation)) return;
+    if (generation.cooldownTimer) clearTimeout(generation.cooldownTimer);
+    generation.cooldownTimer = null;
+    generation.cooldownProbeToken = null;
+    generation.cooldownDeferredTokens.clear();
+    void processPendingActionables(generation);
+  });
+  pi.on?.("model_select", (event) => {
+    mainModel = { provider: event.model.provider, id: event.model.id };
+    if (!readProviderCooldown(mainProviderCooldownFile, mainModel)) {
+      generation.cooldownProbeToken = null;
+      generation.cooldownDeferredTokens.clear();
+      void processPendingActionables(generation);
+    } else scheduleProviderRetry(generation);
+  });
 
   let calmPresentation: CalmPresentationState = {
     active: false,
@@ -572,8 +623,16 @@ export default function (pi: ExtensionAPI) {
     owner: SessionGeneration,
     message: string,
     pending?: PendingActionableClose,
-  ): Promise<boolean> {
+  ): Promise<boolean | "deferred"> {
     if (!generationIsLive(owner)) return false;
+    // Leave this main-only wake pending and continue offering later wakes to
+    // the healthy branch. A single timer retries when the known outage ends.
+    const cooldown = pending ? readProviderCooldown(mainProviderCooldownFile, mainModel) : null;
+    if (pending && (cooldown || (owner.cooldownProbeToken && owner.cooldownProbeToken !== pending.token))) {
+      owner.cooldownDeferredTokens.add(pending.token);
+      if (cooldown) scheduleProviderRetry(owner);
+      return "deferred";
+    }
     const content = encodeFirstmateOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
@@ -665,7 +724,7 @@ export default function (pi: ExtensionAPI) {
     repairFailed: boolean,
     pending: PendingActionableClose,
     recovery?: { generation: string; watcherPid: string },
-  ): Promise<boolean> {
+  ): Promise<boolean | "deferred"> {
     if (!generationIsLive(owner)) return false;
     if (recovery) {
       const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
@@ -764,7 +823,8 @@ export default function (pi: ExtensionAPI) {
         // A record Pi has accepted but not consumed is neither redelivered
         // nor finished here: consumption finishes it, replacement replays it.
         const pending = owner.pendingActionables.find(
-          (item) => !item.delivered && !owner.unconsumedWakes.has(item.token),
+          (item) => !item.delivered && !owner.unconsumedWakes.has(item.token) &&
+            !owner.cooldownDeferredTokens.has(item.token),
         );
         if (!pending) break;
         const existingClaim = replacementCoordinator.deliveries.get(pending.token);
@@ -802,6 +862,11 @@ export default function (pi: ExtensionAPI) {
           }
           const message = restoration.failure ? `${pending.message}\n\n${restoration.failure}` : pending.message;
           const delivered = await deliverActionableWake(owner, message, Boolean(restoration.failure), pending, restoration.recovery);
+          if (delivered === "deferred") {
+            settleClaim("failed");
+            releaseClaim();
+            continue;
+          }
           if (!delivered) {
             settleClaim("failed");
             releaseClaim();
@@ -1125,7 +1190,8 @@ export default function (pi: ExtensionAPI) {
     consumeWake(generation, userMessageText(event.message.content));
   });
 
-  pi.on?.("session_start", async () => {
+  pi.on?.("session_start", async (_event, ctx) => {
+    if (ctx.model) mainModel = { provider: ctx.model.provider, id: ctx.model.id };
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
     if (lockOwnership() !== "owned") return;

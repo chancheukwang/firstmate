@@ -5445,11 +5445,11 @@ else
 fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
-    if spawn_fresh_commit_rollback; then
-      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
-    else
-      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), and failed-dispatch cleanup is incomplete; the provisional record may remain at $STATE/$ID.meta - close out endpoint $T and local copy $WT by hand, then remove the record and busy state before retrying" >&2
-    fi
+    # The launch has already delivered the brief. A failed backlog commit
+    # cannot prove that the worker stopped, so preserve its ownership record
+    # and busy generation for the supervisor to reconcile under this lock.
+    SPAWN_FRESH_COMMIT_PENDING=0
+    echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); the launched worker may be running, so its task record and busy state were preserved at $STATE/$ID.meta - reconcile this same worker and backlog item before any retry" >&2
   else
     echo "error: task $ID was republished but its backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); fix the backlog and re-run the relaunch" >&2
   fi
