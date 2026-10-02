@@ -212,6 +212,13 @@ When the main Pi provider returns a recognized quota, HTML, network, or service 
 The watcher retains those wakes in its existing durable queue, sends one recovery probe when the timer expires, and resumes the rest only after a successful model turn.
 Direct human prompts remain available during the cooldown.
 
+## Pi quiet mode (state/.pi-quiet)
+
+Pi's native `/quiet` command atomically writes `quiet` to the home-local `state/.pi-quiet` flag; `/quiet off` removes it.
+Its presence keeps routine branch outcomes in the durable outcome store instead of injecting messages into main's context.
+Captain outcomes still render and open their processing turns, and ordinary chat or reload does not clear the flag.
+It is independent of `.afk` and `.afk-contract`, changes no approval authority, and does not stop background branch requests.
+
 ## Pi supervision branch model and effort (config/supervision-branch-model, config/supervision-branch-effort)
 
 The branch can run on a cheaper model than main because supervision is an easier job than the captain's own conversation.

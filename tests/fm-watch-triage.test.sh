@@ -3940,7 +3940,7 @@ test_identical_dead_display_of_a_successor_still_reports() {
 # awaiting their merge word.
 # Pinned here, in both directions: while the call stands the first sight still
 # alarms, further sights of the SAME call and status-log state are absorbed, and
-# a new pane hash after the window's end alarms once more; and the identical
+# elapsed time never repeats that unchanged call; and the identical
 # fixture WITHOUT the hold keeps alarming on every hash, because a bound that
 # swallowed an unheld delivery or blocker would be worse than the churn it removes.
 #
@@ -4072,17 +4072,25 @@ test_open_captain_call_bounds_stale_churn() {
     [ "$wakes" -eq 0 ] \
       || fail "[$name] pane churn re-alarmed held work $wakes time(s) inside the re-surface window"
 
-    # After the window ends, the next new pane hash re-surfaces held work exactly
-    # once, so a forgotten call on a churning pane cannot hide behind the bound.
+    # An unchanged decision remains pending without another reminder, even
+    # after the old reminder cadence elapses and the watcher restarts.
     [ -e "$throttle" ] || fail "[$name] the absorbed churn recorded no re-surface cadence to elapse"
     set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
-    hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
-      || fail "[$name] held work did not re-surface once its re-surface window elapsed"
+    hold_watch_churn "$dir" "$out" "$capture" 'idle, elapsed 9s' 1 \
+      || fail "[$name] unchanged captain call re-surfaced after the old reminder cadence"
     wakes=$(hold_stale_wakes "$state")
-    [ "$wakes" -eq 1 ] \
-      || fail "[$name] elapsed re-surface window produced $wakes wakes instead of one"
+    [ "$wakes" -eq 0 ] \
+      || fail "[$name] unchanged captain call produced $wakes repeated reminders"
+
+    # A new failure changes the status provenance and must still surface.
+    printf 'blocked: new CI failure\n' >> "$state/held-merge.status"
+    printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle, new failure' \
+      || fail "[$name] a new failure was hidden behind the old captain call"
+    [ "$(hold_stale_wakes "$state")" -eq 1 ] \
+      || fail "[$name] new failure did not surface exactly once"
   done
-  pass "work under an open captain call surfaces once, absorbs pane churn, then re-surfaces when the window elapses"
+  pass "work under an open captain call surfaces once and stays pending without repeated reminders across cadence and restart"
 }
 
 

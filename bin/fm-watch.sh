@@ -1827,7 +1827,7 @@ stale_wait_declaration() {  # <task>
   printf 'declared:%s' "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
 }
 
-# The same scope for a captain call, carrying the CALL's own lifecycle identity
+# The scope for a captain call, carrying the CALL's own lifecycle identity
 # beside the status signature. The status log is not enough on its own: a task
 # can be answered with `--release` and held again as a genuinely different call
 # without any status append, and binding the throttle to the signature alone let
@@ -1871,14 +1871,16 @@ stale_wait_record() {  # <window-key>
 # preserves their no-backlog-read hot path.
 # While the away-posture record exists the bound is absolute: an open captain
 # call is never rechecked, whatever the throttle says, because nobody is there
-# to answer it and the return brief lists it.
+# to answer it and the return brief lists it. While present, the same call and
+# status state surface once, without a timer-driven reminder. A new status
+# event or a released-then-reheld call still has a distinct declaration.
 captain_call_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2
   STALE_WAIT_DECLARATION=
   task_captain_call_open "$task" || return 1
   STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
   away_record_present && return 0
-  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+  [ "$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)" = "$STALE_WAIT_DECLARATION" ]
 }
 
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it

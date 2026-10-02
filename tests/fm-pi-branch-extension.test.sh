@@ -5799,6 +5799,59 @@ EOF
   pass "an extension-registered provider resolves in the isolated branch runtime"
 }
 
+test_quiet_command_keeps_routine_outcomes_out_of_main() {
+  local repo home out status
+  repo="$TMP_ROOT/quiet-command-root"
+  home="$TMP_ROOT/quiet-command-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, commands, makeCtx, sentToMain, mainEntries, outcomeScript, home, defaultSessionCtx }; })()`);
+const { fire, commands, makeCtx, sentToMain, mainEntries, outcomeScript, home, defaultSessionCtx } = globalThis.__t;
+import { existsSync } from "node:fs";
+const ctx = { ...makeCtx(), ...defaultSessionCtx };
+const command = commands.get("quiet");
+if (!command) throw new Error("/quiet has no native Pi handler and cannot enable quiet mode");
+await fire("session_start", {}, ctx);
+await command.handler("", ctx);
+if (!existsSync(`${home}/state/.pi-quiet`)) throw new Error("/quiet did not persist its opt-in state");
+if (sentToMain.length || (globalThis.__fmPrompts ?? []).length) throw new Error("/quiet invoked a model");
+if (existsSync(`${home}/state/.afk-contract`) || existsSync(`${home}/state/.afk`)) throw new Error("quiet incorrectly entered away posture");
+
+outcomeScript(["append", "--task", "ordinary", "--verdict", "routine", "--summary", "routine update kept in store"]);
+await fire("turn_end", {}, ctx);
+if (sentToMain.length) throw new Error("quiet injected a routine update into main's model context");
+if (outcomeScript(["unread"]) !== "") throw new Error("quiet left the routine row unread to be delivered again");
+if (!outcomeScript(["list", "--recent", "10"]).includes("routine update kept in store")) throw new Error("quiet lost its durable routine outcome");
+
+await fire("before_agent_start", { prompt: "ordinary captain chat", systemPrompt: "base" }, ctx);
+await fire("session_shutdown", {});
+await fire("session_start", {}, ctx);
+if (!existsSync(`${home}/state/.pi-quiet`)) throw new Error("chat or reload exited quiet mode");
+const seq = Number(outcomeScript(["append", "--task", "important", "--verdict", "captain", "--summary", "new failure needs attention"]));
+await fire("turn_end", {}, ctx);
+await fire("agent_settled", {}, ctx);
+if (!mainEntries.some((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === seq)) throw new Error("quiet hid a captain outcome");
+if (!sentToMain.some((item) => item.message.customType === "fm-branch-process" && item.options.triggerTurn)) throw new Error("quiet parked main instead of escalating");
+
+outcomeScript(["mark-processed", "--through", String(seq)]);
+await command.handler("off", ctx);
+if (existsSync(`${home}/state/.pi-quiet`)) throw new Error("/quiet off did not clear opt-in state");
+const prior = sentToMain.length;
+outcomeScript(["append", "--task", "ordinary", "--verdict", "routine", "--summary", "routine delivery restored"]);
+await fire("turn_end", {}, ctx);
+if (!sentToMain.slice(prior).some((item) => item.message.customType === "fm-branch-merge" && item.message.display)) throw new Error("/quiet off did not restore routine delivery");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "quiet must persist, retain routine history, and still escalate captain outcomes: $out"
+  pass "native /quiet uses no model, survives chat and reload, keeps routine rows out of main, and still escalates captain outcomes"
+}
+
+
 test_outcomes_tool_call_headers_follow_the_loaded_pi_version
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
@@ -5849,3 +5902,5 @@ test_delivery_keeps_the_event_loop_live_and_ordered
 test_session_replacement_during_delivery_neither_loses_nor_duplicates
 test_store_failure_during_delivery_neither_loses_nor_duplicates
 test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication
+
+test_quiet_command_keeps_routine_outcomes_out_of_main
