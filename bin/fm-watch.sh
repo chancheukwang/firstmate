@@ -33,13 +33,10 @@
 #                          applies does the log's latest recognized status event decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
-#                          wedge threshold also surfaces, with an "escalation N"
-#                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
-#                          consecutive escalations on the SAME pane, the reason
-#                          also carries a "demand-deep-inspection" marker so the
-#                          wake payload itself, not just repetition, forces a
-#                          closer look instead of another routine supervision
-#                          resume. Unless afk is active. A pane about to escalate
+#                          wedge threshold also surfaces once for the unchanged
+#                          task and worker incarnation. It is re-armed by a
+#                          meaningful state change, not elapsed time or an
+#                          escalation count. Unless afk is active. A pane about to escalate
 #                          that can account for its quiet - a `paused:` external
 #                          wait or a verified `captain-held` transfer its worker
 #                          declared, or, where config/wedge-defer-parked-gate
@@ -52,12 +49,14 @@
 #                          because files appearing there are liveness the pane and
 #                          the run step cannot show; that deferral still
 #                          re-surfaces once per PAUSE_RESURFACE_SECS, and a pane
-#                          that writes nothing keeps the unchanged schedule.
+#                          that writes nothing gets its first inspection once
+#                          its semantic state has not already been inspected.
 #                          A pane whose recorded endpoint holds no agent at all is
 #                          not a wedge and is reported ONCE instead of escalating
 #                          on that cadence forever (wedge_dead_record); only the
 #                          two recovery-grade verdicts license it, and every other
-#                          verdict escalates unchanged.
+#                          verdict retains its first inspection and is then
+#                          script-side until meaningful state changes.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -72,8 +71,8 @@
 #                          every other pane goes through the same wedge timer,
 #                          the dead-record probe above included, and surfaces
 #                          with the identical "stale: ..." reason, escalation
-#                          count, and demand-deep-inspection marker for a live
-#                          agent, for human inspection only - never an automatic
+#                          one-per-semantic-state inspection for a live agent,
+#                          for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
 #   stale: <window> (unread firstmate instruction: ...)
@@ -338,9 +337,9 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # is crossed, busy_turn_over_age routes the pane through
 # busy_turn_bound_check, which hands a crossed bound to the same
 # STALE_ESCALATE_SECS-paced wedge_timer_check used for a provably-working
-# non-busy stale - so it escalates via the existing stale reason, escalation
-# counter, and demand-deep-inspection marker for human inspection only, never an
-# automatic interrupt, signal, or restart - unless the crew declared the wait
+# non-busy stale - so it escalates via the existing stale reason for one
+# inspection per semantic state, never an automatic interrupt, signal, or restart
+# - unless the crew declared the wait
 # itself, which takes the long pause cadence instead. Set generously above
 # any legitimate interval without observable progress, including silent long
 # tool calls, builds, or test runs.
@@ -1199,18 +1198,6 @@ secondmate_liveness_tick() {
   [ "$failed" -eq 0 ]
 }
 
-# Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
-# (default 3): a pane that keeps re-wedging on the SAME stale hash - each
-# escalation gets absorbed again as "still validating" one poll later, since the
-# hash never changes - can otherwise repeat forever with no signal that this is
-# no longer a one-off. At the threshold, wedge_timer_check appends a
-# "demand-deep-inspection" marker to the wake payload so the wake reason itself
-# (not just repetition the supervisor has to notice on its own) forces a closer
-# look instead of another routine supervision resume. Reset wherever a window's
-# pane/hash state resets to genuinely active (see the two rm-on-reset call sites
-# below).
-FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
-
 # One bounded re-surface for a pane the watcher is deliberately absorbing, so no
 # absorb can rot invisibly. <age> is how long the current absorb has held and
 # <throttle> is the per-window marker whose mtime records the last re-surface, so
@@ -1248,8 +1235,7 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min
 # uses, throttled by its own .writing-resurfaced-<key> marker - and a crew whose
 # worktree churns without real progress cannot stay invisible. The escalation
 # counter is left alone: it is neither advanced (this is not an escalation) nor
-# reset (a later genuine escalation must still carry the demand-deep-inspection
-# history it had already earned).
+# reset; the semantic-state receipt controls whether the supervisor is woken.
 wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
   local win=$1 since_file=$2 label=$3 age=$4 key wsf wage
   key=$(window_key "$win")
@@ -1305,7 +1291,7 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 #
 # A declared clearing time that has ALREADY passed (`paused: ... until <t>`) is
 # not evidence: the wait the worker described is over, so it no longer explains
-# the silence, and the pane keeps the unchanged schedule. The records are read in
+# the silence, and the first wedge inspection remains eligible. The records are read in
 # this order rather than pooled because the routing already guarantees it is the
 # right one: a pane whose last line is `paused:` or `captain-held:` reaches this
 # timer only through pause_state_class answering `working`, so its crew state is
@@ -1315,8 +1301,8 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # and that one guard is what makes an unconfigured home's behaviour identical to
 # having no second record at all: it is read before the fold, so no fold or
 # crew-state read is spent, no wait record exists to defer on, no recheck wording
-# is reachable, and the lane keeps the unchanged escalation schedule, reason and
-# demand-deep-inspection wording. Unlike the status line, which is the worker's
+# is reachable, and the lane retains its first wedge inspection. Unlike the
+# status line, which is the worker's
 # own declaration about its own silence, this record is derived from a pipeline's
 # gate state, so which lanes lose the ladder for it is a home's choice to make
 # rather than a default every fleet inherits - the same reason
@@ -1349,13 +1335,13 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # A `blocked` record does not count: a blocker is not an unanswered gate decision
 # and a different action clears it. A gate awaiting the CREWMATE's own answer is
 # deliberately NOT evidence either: a crewmate that goes quiet before answering
-# its own gate is exactly the wedge this ladder exists to catch, so those keep
-# the unchanged schedule, reason and demand-deep-inspection wording.
+# its own gate is exactly the wedge this ladder exists to catch, so those retain
+# their first wedge inspection.
 # Nothing here weakens detection for a pane with no wait at all - their
-# escalation schedule, reason and wording are untouched, and every way this
+# first-inspection path is retained, and every way this
 # signal can come back empty (an unreadable status file, a fold with nothing
-# open, a key convention nobody followed) escalates on the unchanged schedule
-# rather than losing the ladder. The status-line and fold reads are file reads;
+# open, a key convention nobody followed) retains the first inspection rather
+# than losing detection. The status-line and fold reads are file reads;
 # the crew-state read is the costly one (it may make a bounded no-mistakes call),
 # so it is taken only behind a first fold read that finds some open
 # `needs-decision` at all, and only in the at-threshold branch - at most once per
@@ -1423,8 +1409,7 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
 # costly parked-gate consult is owed to the supervisor instead, never silenced
 # here, and its own deferral restarts the timer below.
 # The escalation counter is left alone, exactly as the write deferral leaves it:
-# this is not an escalation, and a later genuine one must keep the
-# demand-inspection history it had already earned.
+# this is not an escalation.
 wedge_defer_wait() {  # <window> <since-file> <triage-label> <idle-age> <wait-record>
   local win=$1 since_file=$2 label=$3 age=$4 record=$5
   local kind subject whom action anchor key mtime wage min_age waited us ok
@@ -1505,8 +1490,8 @@ clear_write_tracking() {  # <window-key>
 # fm_backend_agent_state (bin/fm-backend.sh) owns the vocabulary and the
 # process-level proof behind it. Every verdict short of proof - `alive`,
 # `ambiguous`, `unreadable`, `unverified`, or a read that failed outright - keeps
-# the unchanged escalation schedule, reason and count, so this narrows WHICH panes
-# escalate and never how loudly the ones that still do.
+# the first-inspection behavior, so this narrows WHICH panes escalate and never
+# how loudly the first report is surfaced.
 #
 # Deliberately NOT a deferral like the two above it. They restart the idle timer
 # because the pane might still be working; this is terminal for as long as the
@@ -1561,6 +1546,46 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   wake "$reason"
 }
 
+# A wedge wake is useful once for one unchanged task state. Keep this signature
+# across watcher restarts so elapsed time and the escalation counter alone do
+# not reopen a model turn. Status, turn, explicit progress, busy-state sequence,
+# worker incarnation, and confirmed control result are state changes that can
+# re-arm it. Pane display changes alone are deliberately excluded.
+wedge_episode_signature() {  # <task>
+  local task=$1 status turn progress busy gen control
+  status=$(fm_wake_signal_sig "$STATE/$task.status" 2>/dev/null || true)
+  turn=$(fm_wake_signal_sig "$STATE/$task.turn-ended" 2>/dev/null || true)
+  progress=$(fm_wake_signal_sig "$STATE/$task.progress" 2>/dev/null || true)
+  busy=$(fm_wake_signal_sig "$STATE/$task.busy-state" 2>/dev/null || true)
+  gen=$(fm_busy_current_gen "$STATE" "$task" 2>/dev/null || true)
+  control=$(awk -F= '
+    /^phase=/ { phase=$2 }
+    /^exit_result=/ { result=$0 }
+    END {
+      if (phase == "complete" || phase == "exited" || phase ~ /^failed:/) {
+        print phase " " result
+      }
+    }
+  ' "$STATE/$task.control-relaunch" 2>/dev/null || true)
+  printf '%s\n' "$status" "$turn" "$progress" "$busy" "$gen" "$control" | hash_pane
+}
+
+# Persist the one model inspection already requested for this task state. The
+# immediate stale classification and later wedge timer share this receipt.
+wedge_inspection_record() {  # <task>
+  local task=$1 key signature
+  key=$(window_key "$task")
+  signature=$(wedge_episode_signature "$task")
+  printf '%s' "$signature" > "$STATE/.wedge-alerted-$key"
+}
+
+wedge_inspection_is_current() {  # <task>
+  local task=$1 key signature
+  key=$(window_key "$task")
+  signature=$(wedge_episode_signature "$task")
+  [ "$(cat "$STATE/.wedge-alerted-$key" 2>/dev/null || true)" = "$signature" ]
+}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
@@ -1581,7 +1606,7 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # already own on their existing bounded cadences and only a pane that would
 # otherwise alarm pays for a backend read.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence key signature alerted
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1606,13 +1631,19 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task"; then
           return 0
         fi
-        n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
+        key=$(window_key "$task")
+        signature=$(wedge_episode_signature "$task")
+        alerted="$STATE/.wedge-alerted-$key"
+        if [ "$(cat "$alerted" 2>/dev/null || true)" = "$signature" ]; then
+          date +%s > "$since_file"
+          triage_log "absorbed unchanged wedge episode (no new status, turn, progress, generation, or pane state): $win"
+          return 0
+        fi
+        n=1
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
-        if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
-        fi
         fm_wake_append stale "$win" "$reason" || exit 1
+        wedge_inspection_record "$task" || exit 1
         rm -f "$since_file"
         clear_write_tracking "$(window_key "$win")"
         wake "$reason"
@@ -1714,7 +1745,7 @@ handle_paused_stale() {  # <window> <task> <hash>
 # a supervisor decision that is still open also takes the bounded recheck rather
 # than the ladder, because who owes that answer does not depend on what the pane
 # is rendering, and the recheck names that supervisor and the action that clears
-# it. An unconfigured home keeps the unchanged ladder there.
+# it. An unconfigured home keeps the first wedge inspection there.
 # Away mode remains daemon-owned and receives the undecorated wake identity for
 # its own classification, which is why the declaration is read before the afk
 # branch rather than after it.
@@ -2002,9 +2033,18 @@ surface_nonterminal_stale() {  # <window> <hash>
   elif [ -n "$STALE_WAIT_DECLARATION" ]; then
     bounded=0
   fi
+  if [ "$throttled" -ne 0 ] && [ "$declared" -ne 0 ] && [ "$bounded" -ne 0 ]; then
+    if wedge_inspection_is_current "$task"; then
+      throttled=0
+      triage_log "absorbed unchanged immediate stale episode (pane hash changed without semantic task state): $win"
+    fi
+  fi
   if [ "$throttled" -ne 0 ]; then
     fm_wake_append stale "$win" "stale: $win" || exit 1
     stale_wait_record "$key"
+    if [ "$declared" -ne 0 ] && [ "$bounded" -ne 0 ]; then
+      wedge_inspection_record "$task" || exit 1
+    fi
   fi
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
@@ -3015,6 +3055,12 @@ EOF
         file_reason="$reason"
         case " $FM_SIGNAL_NEEDS_DECISION_FILES " in *" $f "*) file_reason="needs-decision:$files" ;; esac
         fm_wake_append signal "$(basename "$f")" "$file_reason" || exit 1
+        case "$f" in
+          *.status) signal_task=$(basename "$f" .status) ;;
+          *.turn-ended) signal_task=$(basename "$f" .turn-ended) ;;
+          *) signal_task='' ;;
+        esac
+        [ -z "$signal_task" ] || wedge_inspection_record "$signal_task" || exit 1
       done <<EOF
 $pending
 EOF
@@ -3131,9 +3177,15 @@ EOF
             printf '%s' "$h" > "$sf"
             triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $w"
           elif [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
-            printf '%s' "$h" > "$sf"
-            wake "stale: $w"
+            if wedge_inspection_is_current "$task"; then
+              printf '%s' "$h" > "$sf"
+              triage_log "absorbed unchanged away-mode stale episode (pane hash changed without semantic task state): $w"
+            else
+              fm_wake_append stale "$w" "stale: $w" || exit 1
+              wedge_inspection_record "$task" || exit 1
+              printf '%s' "$h" > "$sf"
+              wake "stale: $w"
+            fi
           fi
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's latest status event is captain-relevant - but that alone is not
@@ -3169,19 +3221,27 @@ EOF
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
-              stale_wait_record "$key"
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
-              clear_write_tracking "$key"
-              stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
-              stale_record=$(status_span_first_actionable_record "$stale_status" 0)
-              case $? in
-                0|1) stale_end=${stale_record%%$'\t'*}; stale_rest=${stale_record#*$'\t'}; stale_ident=${stale_rest%%$'\t'*} ;;
-                *) stale_end=''; stale_ident='' ;;
-              esac
-              mark_surfaced "$stale_status" "$stale_end" "$stale_ident"
-              wake "stale: $w"
+              if wedge_inspection_is_current "$task"; then
+                printf '%s' "$h" > "$sf"
+                rm -f "$ssf"
+                clear_write_tracking "$key"
+                triage_log "absorbed unchanged terminal stale episode (pane hash changed without semantic task state): $w"
+              else
+                fm_wake_append stale "$w" "stale: $w" || exit 1
+                wedge_inspection_record "$task" || exit 1
+                stale_wait_record "$key"
+                printf '%s' "$h" > "$sf"
+                rm -f "$ssf"
+                clear_write_tracking "$key"
+                stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
+                stale_record=$(status_span_first_actionable_record "$stale_status" 0)
+                case $? in
+                  0|1) stale_end=${stale_record%%$'\t'*}; stale_rest=${stale_record#*$'\t'}; stale_ident=${stale_rest%%$'\t'*} ;;
+                  *) stale_end=''; stale_ident='' ;;
+                esac
+                mark_surfaced "$stale_status" "$stale_end" "$stale_ident"
+                wake "stale: $w"
+              fi
             fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a

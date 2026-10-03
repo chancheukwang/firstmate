@@ -2316,7 +2316,7 @@ test_stale_terminal_status_overridden_by_active_run() {
   # Phase A: a high escalation threshold means the first sighting is absorbed,
   # not surfaced, despite the captain-relevant "done:" status-log line.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_STATE_OVERRIDE="$state" FM_WATCH_HANDLING_SUCCESSOR=1 FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_poll_cycle "$state" "$pid"; then
@@ -2436,7 +2436,27 @@ test_nonterminal_stale_not_working_surfaced() {
   [ ! -e "$state/.stale-since-$key" ] || fail "stale-since timer should not be set when surfacing immediately"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the immediate stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "immediate stale wake was not queued"
-  pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the immediate stale inspection"
+
+  # Once the same task later gains a working verdict, crossing the wedge timer
+  # is still the same unchanged idle episode and must not reopen the inspection.
+  printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.stale-since-$key"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture_file" "$window" \
+    'state: working · source: run-step · ci running' absorb \
+    || fail "the unchanged episode re-opened a model turn at the later wedge threshold"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "the later wedge threshold queued a duplicate inspection"
+
+  # A substantive progress edge re-arms the same monitor even though the pane
+  # hash itself is unchanged.
+  printf 'progress: new output\n' > "$state/stopped.progress"
+  printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.stale-since-$key"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture_file" "$window" \
+    'state: working · source: run-step · ci running' exit \
+    || fail "a real progress edge did not re-arm the wedge inspection"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+    || fail "the progress-triggered inspection was not the first escalation"
+  pass "an immediate stale inspection suppresses its later unchanged wedge wake, while progress re-arms inspection"
 }
 
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
@@ -2952,15 +2972,13 @@ test_live_paused_until_controls_recheck_time() {
 # elapsed idle time alone, without ever asking whether the worker had already
 # said why its pane was quiet. Nothing re-consulted that declaration once the
 # timer was running, so the ladder climbed for as long as the wait lasted and
-# each escalation cost a supervising turn. Past FM_WEDGE_DEMAND_INSPECT_COUNT
-# every repeat also carried demand-deep-inspection, which by its own wording
-# forbids re-absorbing on the run-step or pane state, so the supervisor could not
-# even use the evidence that was there.
+# each escalation cost a supervising turn. An unchanged wedge episode now gets
+# one inspection, then waits for meaningful task state instead of elapsed time.
 #
 # Both directions are pinned in each case below, because a bound that only
 # proves the quiet direction would be indistinguishable from simply deleting
 # wedge detection: the lane WITHOUT a declaration must keep the identical
-# schedule, escalation count, reason and demand-deep-inspection wording.
+# schedule and reason on its first threshold crossing.
 
 # Run one watcher round against a lane whose pane is already stably stale at the
 # recorded hash - the population wedge_timer_check owns. FM_STALE_ESCALATE_SECS=1
@@ -3112,21 +3130,21 @@ test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict() {
   ack_stopped_cycle "$state" || fail "could not acknowledge the elapsed-declaration escalation"
 
   # The other direction: the same working verdict with no declaration at all
-  # keeps the unchanged ladder.
+  # surfaces once, then unchanged threshold crossings stay script-side.
   dir=$(wedge_threshold_fixture declared-wait-control 'working: validation under way' 0)
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  n=1
-  while [ "$n" -le 3 ]; do
-    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
-      || fail "an undeclared working lane stopped escalating at threshold $n"
-    ack_stopped_cycle "$state" || fail "could not acknowledge undeclared escalation $n"
-    grep -F "possible wedge, escalation $n" "$out" >/dev/null \
-      || fail "an undeclared working lane did not reach escalation $n: $(cat "$out")"
-    n=$((n + 1))
-  done
-  grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row' "$out" >/dev/null \
-    || fail "an undeclared working lane lost the demand-deep-inspection wording: $(cat "$out")"
-  pass "a declared wait is not wedge-escalated by a working verdict, while an elapsed declaration and an undeclared lane both keep the unchanged ladder"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "an undeclared working lane did not surface its first wedge inspection"
+  ack_stopped_cycle "$state" || fail "could not acknowledge undeclared first escalation"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+    || fail "an undeclared working lane did not surface the first wedge: $(cat "$out")"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$(printf '%s' "$window" | tr ':/.' '___')"
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+    || fail "an unchanged wedge repeated a model wake after its first inspection"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "an unchanged wedge queued a repeat wake: $(cat "$state/.wake-queue")"
+  pass "declared waits retain their cadence, while an unchanged working wedge surfaces once"
 }
 
 # `fm-send --resolve-key default` answers a keyless decision by appending a
@@ -3345,22 +3363,15 @@ working: still parked at that gate'
     || fail "a gate awaiting a human counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
 
   # The other direction, and the whole reason the distinction is drawn: a gate
-  # the crewmate itself must answer keeps the unchanged schedule, reason and
-  # demand-deep-inspection wording.
+  # the crewmate itself must answer still surfaces its first wedge inspection.
   dir=$(wedge_threshold_fixture parked-gate-crewmate "$escalated" 2000)
   arm_parked_gate "$dir"
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  n=1
-  while [ "$n" -le 3 ]; do
-    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$crewmate" exit \
-      || fail "a gate awaiting the crewmate stopped escalating at threshold $n: $(cat "$out")"
-    ack_stopped_cycle "$state" || fail "could not acknowledge crewmate-gate escalation $n"
-    grep -F "possible wedge, escalation $n" "$out" >/dev/null \
-      || fail "a gate awaiting the crewmate did not reach escalation $n: $(cat "$out")"
-    n=$((n + 1))
-  done
-  grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row' "$out" >/dev/null \
-    || fail "a gate awaiting the crewmate lost the demand-deep-inspection wording: $(cat "$out")"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$crewmate" exit \
+    || fail "a gate awaiting the crewmate did not surface its first wedge inspection: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge first crewmate-gate escalation"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+    || fail "a gate awaiting the crewmate did not reach its first wedge threshold: $(cat "$out")"
   grep -F 'verified wait at a parked gate' "$out" >/dev/null \
     && fail "a gate awaiting the crewmate was deferred as a wait on a human: $(cat "$out")"
 
@@ -3393,21 +3404,15 @@ working: still parked at that gate'
     || fail "an away-posture parked gate counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
 
   # An open decision under an unrelated key does not bind to this gate, so the
-  # lane keeps the unchanged ladder: nothing says anyone was told about it.
+  # lane still surfaces the first wedge inspection.
   dir=$(wedge_threshold_fixture parked-gate-unrelated-key "$unrelated" 2000)
   arm_parked_gate "$dir"
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  n=1
-  while [ "$n" -le 3 ]; do
-    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
-      || fail "a gate with only an unrelated open decision stopped escalating at threshold $n: $(cat "$out")"
-    ack_stopped_cycle "$state" || fail "could not acknowledge unrelated-key escalation $n"
-    grep -F "possible wedge, escalation $n" "$out" >/dev/null \
-      || fail "a gate with only an unrelated open decision did not reach escalation $n: $(cat "$out")"
-    n=$((n + 1))
-  done
-  grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row' "$out" >/dev/null \
-    || fail "a gate with only an unrelated open decision lost the demand-deep-inspection wording: $(cat "$out")"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
+    || fail "a gate with only an unrelated open decision did not surface its first wedge inspection: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge unrelated-key first escalation"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+    || fail "a gate with only an unrelated open decision did not take the first wedge threshold: $(cat "$out")"
   grep -F 'verified wait at a parked gate' "$out" >/dev/null \
     && fail "an unrelated open decision was read as this gate's wait: $(cat "$out")"
 
@@ -3431,7 +3436,7 @@ working: still parked at that gate'
 # for it. Absent `config/wedge-defer-parked-gate` the lane this whole file
 # otherwise defers - human-owed gate, open decision keyed to that run, every
 # signal the armed cases assert on - must escalate on the unchanged schedule
-# with the unchanged reason and demand-deep-inspection wording, and the evidence
+# with the unchanged first-report reason, and the evidence
 # arm must not even be reached: no current-state read is spent and no recheck
 # throttle is written. The fixture is byte-identical to the armed case above
 # except for the flag, so the difference is attributable to the flag alone.
@@ -3448,17 +3453,11 @@ working: still parked at that gate'
     || fail "the unarmed fixture armed the flag, so it proves nothing"
   export FM_FAKE_CREW_STATE_LOG="$dir/crew-state.calls"
   : > "$FM_FAKE_CREW_STATE_LOG"
-  n=1
-  while [ "$n" -le 3 ]; do
-    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
-      || fail "an unarmed home stopped escalating a parked gate at threshold $n: $(cat "$out")"
-    ack_stopped_cycle "$state" || fail "could not acknowledge unarmed-gate escalation $n"
-    grep -F "possible wedge, escalation $n" "$out" >/dev/null \
-      || fail "an unarmed home did not reach escalation $n: $(cat "$out")"
-    n=$((n + 1))
-  done
-  grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row' "$out" >/dev/null \
-    || fail "an unarmed home lost the demand-deep-inspection wording: $(cat "$out")"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
+    || fail "an unarmed home did not surface a parked gate's first wedge inspection: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge unarmed-gate first escalation"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+    || fail "an unarmed home did not reach its first escalation: $(cat "$out")"
   grep -F 'verified wait at a parked gate' "$out" >/dev/null \
     && fail "an unarmed home deferred a parked gate: $(cat "$out")"
   [ ! -e "$state/.waiting-resurfaced-$key" ] \
@@ -3516,17 +3515,11 @@ test_wedge_threshold_parked_gate_needs_an_unanswered_decision() {
 resolved [key=nm-01RUNGATE-review]: firstmate chose the second fix' 2000)
   arm_parked_gate "$dir"
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  n=1
-  while [ "$n" -le 3 ]; do
-    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
-      || fail "a decided-but-unrelayed gate stopped escalating at threshold $n: $(cat "$out")"
-    ack_stopped_cycle "$state" || fail "could not acknowledge decided-gate escalation $n"
-    grep -F "possible wedge, escalation $n" "$out" >/dev/null \
-      || fail "a decided-but-unrelayed gate did not reach escalation $n: $(cat "$out")"
-    n=$((n + 1))
-  done
-  grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row' "$out" >/dev/null \
-    || fail "a decided-but-unrelayed gate lost the demand-deep-inspection wording: $(cat "$out")"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
+    || fail "a decided-but-unrelayed gate did not surface its first wedge inspection: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge decided-gate first escalation"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+    || fail "a decided-but-unrelayed gate did not reach its first escalation: $(cat "$out")"
   grep -F 'verified wait at a parked gate' "$out" >/dev/null \
     && fail "a gate whose decision was already answered was deferred as a wait on the captain: $(cat "$out")"
 
@@ -3587,7 +3580,6 @@ run_malformed_wait_record_round() {  # <name> <evidence-body>
 
   out="$dir/defer.out"
   FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
-    FM_WEDGE_DEMAND_INSPECT_COUNT=3 \
     bash -c '
       # shellcheck disable=SC1090,SC1091
       . "$1"
@@ -3734,13 +3726,16 @@ test_live_and_unproven_endpoints_still_wedge_escalate() {
       || fail "an $verdict endpoint did not advance the escalation count"
     ack_stopped_cycle "$state" || fail "could not acknowledge the $verdict escalation"
 
-    # And it keeps escalating, with the count climbing exactly as it always did.
+    # Unchanged live and unproven endpoints stay monitored but do not spend a
+    # second model wake just because another stale interval elapsed.
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$(printf '%s' "$window" | tr ':/.' '___')"
     : > "$out"
-    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
-      || fail "an $verdict endpoint escalated only once: $(cat "$out")"
-    grep -F 'possible wedge, escalation 2' "$out" >/dev/null \
-      || fail "an $verdict endpoint did not keep counting: $(cat "$out")"
-    ack_stopped_cycle "$state" || fail "could not acknowledge the second $verdict escalation"
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+      || fail "an unchanged $verdict endpoint did not remain monitored without a repeated wake"
+    [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+      || fail "an unchanged $verdict endpoint queued a repeated wake: $(cat "$state/.wake-queue")"
+    [ "$(cat "$state/.wedge-escalations-$(printf '%s' "$window" | tr ':/.' '___')" 2>/dev/null || true)" = 1 ] \
+      || fail "an unchanged $verdict endpoint advanced the escalation count"
     unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
   done
   pass "a live wedged agent, an unattributable one, and an unreadable endpoint escalate unchanged"
@@ -4095,9 +4090,9 @@ test_open_captain_call_bounds_stale_churn() {
 
 
 
-# The other half of the same bound, and the one that decides whether widening the
-# wait was safe: the identical fixtures with NO hold must keep alarming on every
-# new hash, on both branches.
+# The same semantic-state receipt also bounds immediate stale surfaces that have
+# no captain hold: display-only pane hashes stay script-side, while a meaningful
+# progress edge re-arms one inspection.
 test_stale_churn_without_a_captain_call_still_alarms() {
   local spec name line dir state out capture round wakes
   command -v tasks-axi >/dev/null 2>&1 \
@@ -4111,18 +4106,22 @@ test_stale_churn_without_a_captain_call_still_alarms() {
     dir=$(make_hold_home "$name" "$line" nohold) \
       || fail "[$name] could not build an unheld backlog fixture"
     state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
-    round=1
-    while [ "$round" -le 2 ]; do
-      hold_watch_surface "$dir" "$out" "$capture" "idle, elapsed ${round}s" \
-        || fail "[$name] an unheld stale window stopped alarming on round $round"
-      wakes=$(hold_stale_wakes "$state")
-      [ "$wakes" -eq 1 ] \
-        || fail "[$name] round $round produced $wakes wakes instead of one"
-      ack_stopped_cycle "$state" || fail "[$name] could not acknowledge round $round"
-      round=$((round + 1))
-    done
+    hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+      || fail "[$name] first sight did not surface"
+    [ "$(hold_stale_wakes "$state")" -eq 1 ] \
+      || fail "[$name] first sight did not produce one wake"
+    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge first sight"
+    hold_watch_churn "$dir" "$out" "$capture" 'idle, display tick' 2 \
+      || fail "[$name] watcher exited while monitoring display-only churn"
+    [ "$(hold_stale_wakes "$state")" -eq 0 ] \
+      || fail "[$name] display-only pane churn produced repeated wakes"
+    printf 'progress: new output\n' > "$state/held-merge.progress"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle, actual progress' \
+      || fail "[$name] watcher exited when substantive progress arrived"
+    [ "$(hold_stale_wakes "$state")" -eq 1 ] \
+      || fail "[$name] meaningful progress did not re-arm inspection"
   done
-  pass "a stale window with no open captain call keeps alarming on every new hash"
+  pass "an unheld stale window ignores display-only hashes and re-inspects after substantive progress"
 }
 
 
@@ -4475,19 +4474,11 @@ test_paused_authoritative_working_preserves_wedge_timer() {
   pass "a paused status overridden by authoritative working preserves its wedge timer, is rechecked rather than wedge-escalated while the declaration stands, and escalates once it is lifted"
 }
 
-# --- consecutive wedge escalations on the same pane demand deep inspection ----
-# Root cause of the PR #252 incident's ~20 minutes of unnoticed green: each
-# wedge escalation fires, gets classified as "still validating" one poll later
-# (the timer restarts, see wedge_timer_check), and repeats forever on a pane
-# that never changes. A single escalation reason looks identical every round,
-# so nothing in the payload itself signals "this has now happened N times in a
-# row" - that judgment call was left entirely to the supervisor noticing the
-# repetition on its own. This is the safety-net fix: past
-# FM_WEDGE_DEMAND_INSPECT_COUNT consecutive escalations on the SAME pane, the
-# wake reason itself carries a "demand-deep-inspection" marker.
+# --- unchanged wedge state stays script-side across watcher restarts ---------
 
-test_wedge_escalation_marks_demand_deep_inspection_after_threshold() {
+test_unchanged_wedge_is_suppressed_across_restarts_until_progress() {
   local dir state fakebin out capture_file window key pane_hash sig pid n
+  local working='state: working · source: run-step · validating (running)'
   dir=$(make_case wedge-escalation); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-wedged"
@@ -4500,7 +4491,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   # The crew's pipeline is actively running: a static pane is normal (waiting on CI).
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STATE="$working"
 
   # Priming round: first sighting of this stale hash classifies and absorbs it
   # (establishing .stale-$key and starting the wedge timer) without going
@@ -4517,28 +4508,45 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold() {
 
   n=1
   while [ "$n" -le 3 ]; do
-    # Backdate the wedge timer past the threshold before each round, mirroring
-    # the existing wedge-escalation tests' Phase B (the subsequent-sight timer
-    # path does not re-read the crew state).
     echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
     : > "$out"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_STATE_OVERRIDE="$state" FM_WATCH_HANDLING_SUCCESSOR=1 FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
     pid=$!
-    wait_for_exit "$pid" 100 || fail "watcher did not escalate on consecutive wedge round $n: $(cat "$out")"
-    grep -F "escalation $n" "$out" >/dev/null || fail "round $n did not report escalation count $n: $(cat "$out")"
-    if [ "$n" -lt 3 ]; then
-      grep -F "demand-deep-inspection" "$out" >/dev/null && fail "round $n escalated to demand-deep-inspection before the threshold: $(cat "$out")"
+    if [ "$n" -eq 1 ]; then
+      wait_for_exit "$pid" 100 || fail "first wedge threshold did not request inspection: $(cat "$out")"
+      grep -F 'possible wedge, escalation 1' "$out" >/dev/null || fail "first wedge report was missing: $(cat "$out")"
+      ack_stopped_cycle "$state" || fail "could not acknowledge first wedge inspection"
     else
-      grep -F "demand-deep-inspection" "$out" >/dev/null || fail "round $n (threshold) did not demand deep inspection: $(cat "$out")"
+      while [ "$n" -le 3 ]; do
+        wait_poll_cycle "$state" "$pid" 300 || { reap "$pid"; fail "unchanged wedge did not stay script-side at restart $n: output=$(cat "$out" 2>/dev/null) queue=$(cat "$state/.wake-queue" 2>/dev/null) receipt=$(cat "$state/.wedge-alerted-wedged" 2>/dev/null)"; }
+        break
+      done
+      reap "$pid"
+      [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] || fail "unchanged wedge queued a repeated model wake at restart $n"
     fi
-    ack_stopped_cycle "$state" || fail "could not acknowledge wedge escalation round $n"
     n=$((n + 1))
   done
-  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 3 ] || fail "escalation counter did not persist across consecutive rounds"
+  printf 'Working... tokens 2048\n' > "$capture_file"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture_file" "$window" "$working" absorb \
+    || fail "pane display churn was not absorbed by deterministic monitoring"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "pane display churn alone reopened model inspection"
+  printf 'progress: compile advanced\n' > "$state/wedged.progress"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_WATCH_HANDLING_SUCCESSOR=1 FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "meaningful progress did not re-arm wedge inspection: $(cat "$out")"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null || fail "the changed progress state did not reopen inspection"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the re-armed inspection"
   unset FM_FAKE_CREW_STATE
-  pass "consecutive wedge escalations on the same pane accumulate and demand deep inspection at the threshold"
+  pass "unchanged wedge state stays script-side across watcher restarts and progress re-arms inspection"
 }
 
 test_wedge_escalation_resets_when_pane_becomes_active() {
@@ -4778,8 +4786,7 @@ test_cleanup_marker_lock_bound_is_decimal_with_zero_default() {
 # the task's spawn record before any turn completes); past the bound, panes
 # without a declared external wait or verified captain-held transfer take the
 # SAME wedge_timer_check already used for a provably-working non-busy stale.
-# Escalation reuses the identical stale reason, escalation counter, and
-# demand-deep-inspection marker - never an
+# Escalation requests one inspection for each semantic task state - never an
 # automatic interrupt or restart.
 
 test_busy_pane_below_turn_age_bound_is_absorbed() {
@@ -4965,7 +4972,7 @@ test_busy_pane_native_progress_resets_age() {
   pass "native progress resets busy age without a completed turn or notification"
 }
 
-test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
+test_busy_pane_unchanged_escalation_is_absorbed() {
   local dir state fakebin out capture_file window key pane_hash sig pid n
   dir=$(make_case busy-turn-age-demand-inspect); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-demand-inspect"
@@ -4993,26 +5000,24 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional busy-wedge priming stop"
 
-  n=1
-  while [ "$n" -le 3 ]; do
-    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-    : > "$out"
-    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-      FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-    pid=$!
-    wait_for_exit "$pid" 100 || fail "busy turn-age escalation round $n did not escalate: $(cat "$out")"
-    grep -F "escalation $n" "$out" >/dev/null || fail "busy turn-age round $n did not report escalation count $n: $(cat "$out")"
-    if [ "$n" -lt 3 ]; then
-      grep -F "demand-deep-inspection" "$out" >/dev/null && fail "busy turn-age round $n escalated to demand-deep-inspection before the threshold: $(cat "$out")"
-    else
-      grep -F "demand-deep-inspection" "$out" >/dev/null || fail "busy turn-age round $n (threshold) did not demand deep inspection: $(cat "$out")"
-    fi
-    ack_stopped_cycle "$state" || fail "could not acknowledge busy turn-age escalation round $n"
-    n=$((n + 1))
-  done
-  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 3 ] || fail "busy turn-age escalation counter did not persist across consecutive rounds"
-  pass "repeated busy turn-age escalations reuse the existing escalation counter and demand deep inspection at the threshold"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "busy turn-age escalation did not surface its first inspection: $(cat "$out")"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null || fail "busy turn-age first report was missing"
+  ack_stopped_cycle "$state" || fail "could not acknowledge busy turn-age inspection"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" 300 || { reap "$pid"; fail "unchanged busy turn-age state did not remain script-side"; }
+  reap "$pid"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] || fail "unchanged busy turn-age state queued a repeat wake"
+  pass "busy turn-age monitoring surfaces once per semantic state and absorbs unchanged threshold repeats"
 }
 
 # --- declared pause + busy pane: the busy-turn bound must honor the declaration
@@ -5123,7 +5128,7 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated() {
 # as a possible wedge. That decoration outranks the daemon's own pause verdict, so a
 # crew that declared the wait itself was wedge-escalated once per
 # FM_STALE_ESCALATE_SECS for as long as the wait lasted, with the escalation count
-# climbing into demand-deep-inspection on a pane nobody needed to inspect.
+# creating timer-driven model requests on a pane nobody needed to re-inspect.
 # Phase A pins the handoff: the plain window identity, no wedge timer, no escalation
 # counter, and no normal-mode pause bookkeeping (the daemon owns that in away mode).
 # Phase B re-arms on the same unchanged pane and pins the one-shot: a second wake
@@ -5462,7 +5467,7 @@ test_wedge_escalation_deferred_while_worktree_is_written() {
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
 
   # Phase B: same fixture, same quiet pane, but nothing written during this idle
-  # window (the crew really is stalled). The unchanged schedule must still fire.
+  # window (the crew really is stalled). Its first wedge inspection must fire.
   set_mtime "$(( $(date +%s) - 900 ))" "$wt/src/main.c"
   echo "$back" > "$state/.stale-since-$key"
   set_mtime "$back" "$state/.stale-since-$key"
@@ -5480,7 +5485,7 @@ test_wedge_escalation_deferred_while_worktree_is_written() {
   [ ! -e "$state/.writing-since-$key" ] || fail "the write-deferral chain outlived a real escalation"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the stalled-crew escalation failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the stalled-crew escalation was not queued"
-  pass "a quiet pane writing its own worktree is deferred, while one writing nothing still wedge-escalates on the unchanged schedule"
+  pass "a quiet pane writing its own worktree is deferred, while one writing nothing still gets its first wedge inspection"
 }
 
 # A deferral is not silence. A worktree can churn without real progress (a
@@ -6714,7 +6719,7 @@ test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
-test_wedge_escalation_marks_demand_deep_inspection_after_threshold
+test_unchanged_wedge_is_suppressed_across_restarts_until_progress
 test_wedge_escalation_resets_when_pane_becomes_active
 test_gone_endpoint_reports_once_instead_of_escalating_forever
 test_live_and_unproven_endpoints_still_wedge_escalate
@@ -6729,7 +6734,7 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_native_progress_resets_age
-test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
+test_busy_pane_unchanged_escalation_is_absorbed
 test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
