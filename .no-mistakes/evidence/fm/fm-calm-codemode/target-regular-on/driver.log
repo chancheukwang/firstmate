@@ -1,0 +1,43 @@
+00:27:07 step ['start']
+00:27:07 step ['wait', 'provider.ts', 60]
+00:27:07 step ['sleep', 1]
+00:27:08 step ['cap', '0-startup']
+00:27:08 cap 0-startup
+00:27:08 step ['type', '/native-calm-example']
+00:27:12 step ['wait', 'NATIVE_CALM_PROMPT']
+00:27:12 step ['sleep', 0.8]
+00:27:13 step ['cap', '1-streaming']
+00:27:13 cap 1-streaming
+00:27:13 step ['wait', 'NATIVE_CALM_FINAL']
+00:27:14 step ['sleep', 0.8]
+00:27:15 step ['cap', '2-settled']
+00:27:15 cap 2-settled
+00:27:15 step ['type', '/calm']
+00:27:16 step ['sleep', 1.2]
+00:27:18 step ['cap', '3-calm-toggled']
+00:27:18 cap 3-calm-toggled
+00:27:18 step ['key', '\x0f']
+00:27:18 step ['sleep', 1.2]
+00:27:19 step ['cap', '4-toggled-ctrl-o']
+00:27:19 cap 4-toggled-ctrl-o
+00:27:19 step ['key', '\x0f']
+00:27:19 step ['sleep', 0.5]
+00:27:20 step ['type', '/calm']
+00:27:21 step ['sleep', 1.2]
+00:27:22 step ['cap', '5-toggled-back']
+00:27:22 cap 5-toggled-back
+00:27:22 step ['type', '/export /var/folders/p7/815p4nqs4d946pvzxllj073w0000gn/T//fm-lab.ztZU1y/export.html']
+00:27:35 step ['sleep', 3]
+00:27:38 step ['cap', '6-after-export']
+00:27:38 cap 6-after-export
+00:27:38 step ['type', '/quit']
+00:27:39 step ['stop']
+00:27:39 exit 0
+00:27:39 step ['start']
+00:27:39 step ['wait', 'NATIVE_CALM_FINAL', 60]
+00:27:40 step ['sleep', 1.5]
+00:27:41 step ['cap', '7-restored']
+00:27:41 cap 7-restored
+00:27:41 step ['type', '/quit']
+00:27:43 step ['stop']
+00:27:43 exit 0

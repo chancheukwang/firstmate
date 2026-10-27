@@ -1,0 +1,51 @@
+----- visible screen -----
+
+ ▀▀█  v1.0.4
+ █▀ █ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+
+[Extensions]
+  fm-calm.ts, provider.ts
+
+
+ Warning: fd not found. Offline mode enabled, skipping download.
+ Warning: ripgrep not found. Offline mode enabled, skipping download.
+
+
+ NATIVE_CALM_PROMPT
+
+
+
+ codemode
+ const result = await tools.bash({command:"sleep 2; printf NATIVE_NESTED_OUTPUT"});
+ text(result);
+ throw new Error("NATIVE_CODEMODE_ERROR");
+
+ ✓ bash {"command":"sleep 2; printf NATIVE_NESTED_OUTPUT"} 2.2s
+
+ {"output":"NATIVE_NESTED_OUTPUT","truncated":false,"exit_code":0,"wall_time_seconds":2.2}
+ Script error:
+ Error: NATIVE_CODEMODE_ERROR
+     at <anonymous> (codemode.js:3:11)
+
+ ... (1 more lines, ctrl+o to expand)
+
+
+ NATIVE_CALM_FINAL
+ The local tool result remains in the session.
+
+ Tool output: collapsed
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+/private/var/folders/p7/815p4nqs4d946pvzxllj073w0000gn/T/fm-lab.ztZU1y/project
+↑1.5k ↓57 R1.3k W1.5k CH84.8% 19.6%/8.2k (auto)                                                        fixture
+
+
+
+
+
+
