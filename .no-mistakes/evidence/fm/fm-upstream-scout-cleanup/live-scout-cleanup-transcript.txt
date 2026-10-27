@@ -1,0 +1,113 @@
+### posture=attended home=$LAB/attended
+error creating /private/tmp/fml.akkpTW/tmux-501/default (Operation not permitted)
+$ tmux list-windows (worker window live):
+error connecting to /private/tmp/fml.akkpTW/tmux-501/default (No such file or directory)
+$ fm-lease.sh claim
+rc=0
+
+--- 1) status says done+idle, but no report: teardown
+fm-gate-refuse: gate agent lifecycle permitted only against lab home $LAB/attended
+REFUSED: scout task lab-scout-attended has no report at $LAB/attended/data/lab-scout-attended/report.md.
+The report is the work product. Have the crewmate write it, or use --force after explicit discard approval.
+rc=1
+$LAB/attended/state/lab-scout-attended.meta
+meta retained
+
+--- 2) report exists, decision inventory unreviewed: teardown
+fm-gate-refuse: gate agent lifecycle permitted only against lab home $LAB/attended
+fm-captain-hold: origin lab-scout-attended has no completed captain-call inventory
+REFUSED: scout task lab-scout-attended has not passed the captain-call completion gate.
+Inventory its report and any visual review through bin/fm-captain-hold.sh before teardown.
+rc=1
+
+--- 3) complete --none while a captain call is unrecorded
+fm-captain-hold: origin lab-scout-attended still has open captain decisions in its status stream; hold a captain task for what remains, or answer them, before attesting --none
+rc=1
+
+--- 4) record + attest + verify captain call
+lab-scout-attended
+rc=0
+complete: lab-scout-attended captain-call inventory reviewed (lab-scout-attended)
+rc=0
+verified: lab-scout-attended captain-call inventory
+rc=0
+
+--- 5) teardown after completion gate
+fm-gate-refuse: gate agent lifecycle permitted only against lab home $LAB/attended
+fm-remote-job-reap-orphans: cannot scan this account's processes for remote job workers
+teardown lab-scout-attended complete (window firstmate:fm-lab-scout-attended, worktree $LAB/attended/projects/missing-lab-scout-attended)
+Backlog: lab-scout-attended stays open in $LAB/attended/data/backlog.md, still held for the captain with its deliverable recorded. Relay the question and close it only with bin/fm-captain-hold.sh answer.
+rc=0
+$ tmux list-windows after:
+error connecting to /private/tmp/fml.akkpTW/tmux-501/default (No such file or directory)
+ls: $LAB/attended/state/lab-scout-attended.meta: No such file or directory
+$LAB/attended/data/lab-scout-attended/report.md
+$ tasks-axi show --full
+  state: queued
+  hold_kind: captain
+  body: "Captain hold set: 2026-10-27T03:51:10Z\n\nDeliverable of the finished work: report data/lab-scout-attended/report.md"
+$ fm-branch-outcome.sh append + unread
+1
+{"seq":1,"epoch":1793073083,"task":"lab-scout-attended","wake":"","verdict":"captain","summary":"fm-gate-refuse: gate agent lifecycle permitted only against lab home $LAB/attended\nfm-remote-job-reap-orphans: cannot scan this account's processes for remote job workers\nteardown lab-scout-attended complete (window firstmate:fm-lab-scout-attended, worktree $LAB/attended/projects/missing-lab-scout-attended)\nBacklog: lab-scout-attended stays open in $LAB/attended/data/backlog.md, still held for the captain with its deliverable recorded. Relay the question and close it only with bin/fm-captain-hold.sh answer.","silent":false,"statusEndpoint":0,"statusIdent":"-"}
+release rc=0
+### posture=away home=$LAB/away
+$ fm-afk-contract.sh enter
+Away posture recorded at 2026-10-27T03:51:23Z: hold-for-return only. No phone channel is configured; anything that needs you waits for your return. Your away instructions are recorded verbatim; the away session will carry them out where it can, and anything it is unsure of, or that needs you, waits for your return. Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say. Expected return: not given. Spend cap: 4 concurrent workers.
+Away posture (recorded):
+  entered: 2026-10-27T03:51:23Z
+  expected return: not given
+  spend cap: 4 concurrent workers
+  reach: hold-for-return only. No phone channel is configured; anything that needs you waits for your return.
+  your words (verbatim):
+    Finish safe cleanup.
+error creating /private/tmp/fml.akkpTW/tmux-501/default (Operation not permitted)
+$ tmux list-windows (worker window live):
+error connecting to /private/tmp/fml.akkpTW/tmux-501/default (No such file or directory)
+$ fm-lease.sh claim
+rc=0
+
+--- 1) status says done+idle, but no report: teardown
+fm-gate-refuse: gate agent lifecycle permitted only against lab home $LAB/away
+REFUSED: scout task lab-scout-away has no report at $LAB/away/data/lab-scout-away/report.md.
+The report is the work product. Have the crewmate write it, or use --force after explicit discard approval.
+rc=1
+$LAB/away/state/lab-scout-away.meta
+meta retained
+
+--- 2) report exists, decision inventory unreviewed: teardown
+fm-gate-refuse: gate agent lifecycle permitted only against lab home $LAB/away
+fm-captain-hold: origin lab-scout-away has no completed captain-call inventory
+REFUSED: scout task lab-scout-away has not passed the captain-call completion gate.
+Inventory its report and any visual review through bin/fm-captain-hold.sh before teardown.
+rc=1
+
+--- 3) complete --none while a captain call is unrecorded
+fm-captain-hold: origin lab-scout-away still has open captain decisions in its status stream; hold a captain task for what remains, or answer them, before attesting --none
+rc=1
+
+--- 4) record + attest + verify captain call
+lab-scout-away
+rc=0
+complete: lab-scout-away captain-call inventory reviewed (lab-scout-away)
+rc=0
+verified: lab-scout-away captain-call inventory
+rc=0
+
+--- 5) teardown after completion gate
+fm-gate-refuse: gate agent lifecycle permitted only against lab home $LAB/away
+fm-remote-job-reap-orphans: cannot scan this account's processes for remote job workers
+teardown lab-scout-away complete (window firstmate:fm-lab-scout-away, worktree $LAB/away/projects/missing-lab-scout-away)
+Backlog: lab-scout-away stays open in $LAB/away/data/backlog.md, still held for the captain with its deliverable recorded. Relay the question and close it only with bin/fm-captain-hold.sh answer.
+rc=0
+$ tmux list-windows after:
+error connecting to /private/tmp/fml.akkpTW/tmux-501/default (No such file or directory)
+ls: $LAB/away/state/lab-scout-away.meta: No such file or directory
+$LAB/away/data/lab-scout-away/report.md
+$ tasks-axi show --full
+  state: queued
+  hold_kind: captain
+  body: "Captain hold set: 2026-10-27T03:51:31Z\n\nDeliverable of the finished work: report data/lab-scout-away/report.md"
+$ fm-branch-outcome.sh append + unread
+1
+{"seq":1,"epoch":1793073103,"task":"lab-scout-away","wake":"","verdict":"captain","summary":"fm-gate-refuse: gate agent lifecycle permitted only against lab home $LAB/away\nfm-remote-job-reap-orphans: cannot scan this account's processes for remote job workers\nteardown lab-scout-away complete (window firstmate:fm-lab-scout-away, worktree $LAB/away/projects/missing-lab-scout-away)\nBacklog: lab-scout-away stays open in $LAB/away/data/backlog.md, still held for the captain with its deliverable recorded. Relay the question and close it only with bin/fm-captain-hold.sh answer.","silent":false,"statusEndpoint":0,"statusIdent":"-"}
+release rc=0
