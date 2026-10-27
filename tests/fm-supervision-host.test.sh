@@ -70,6 +70,13 @@ n=$(( $(ls "$FM_HOME"/engine-call.* 2>/dev/null | wc -l) + 1 ))
     "${FM_LEASE_HOLDER_PID:-}" "${FM_SUPERVISION_PRIMARY_HARNESS:-}" "${FM_BRANCH_REPORT_TURN:-}"
   for a in "$@"; do printf 'arg=%s\n' "$a"; done
 } > "$FM_HOME/engine-call.$n"
+# Capture the public engine argument's delivered prompt, not host source bytes.
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  if [ "${args[$i]}" = --system-prompt-file ]; then
+    cp "${args[$((i + 1))]}" "$FM_HOME/engine-prompt.$n"
+  fi
+done
 # Like Claude, the reported cost is the conversation's running total.
 result() {
   printf '{"type":"result","subtype":"success","is_error":false,"num_turns":3,"total_cost_usd":%s,' "$(awk -v n="$n" 'BEGIN { print n * 0.25 }')"
@@ -867,6 +874,8 @@ test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main() {
   wait_until 250 handled_at_least "$home" 1 \
     || fail "attended: the wake was not handled on the engine: $(cat "$home/host.out"; cat "$home/state/.supervision-host.log")"
   first="$home/engine-call.1"
+  [ "$(cat "$home/engine-prompt.1")" = "$(bash "$ROOT/bin/fm-branch-prompt.sh")" ] \
+    || fail "attended host did not deliver the shared completed-scout prompt"
   assert_re '^actor=branch$' "$first" "the attended engine must run as the branch actor"
   assert_no_re '^POSTURE: AWAY' "$first" "an attended wake must carry no away tail"
   assert_re '^(arg=)?FIRSTMATE SUPERVISION WAKE: signal: ' "$first" "the attended wake must carry the close"
@@ -1731,6 +1740,8 @@ test_away_wake_is_handled_on_the_engine_and_never_reaches_main() {
   lock_pid=$(cat "$home/state/.lock")
 
   first="$home/engine-call.1"
+  [ "$(cat "$home/engine-prompt.1")" = "$(bash "$ROOT/bin/fm-branch-prompt.sh")" ] \
+    || fail "away host did not deliver the shared completed-scout prompt"
   assert_re '^actor=branch$' "$first" "the engine must run as the branch actor"
   assert_re "^holder=$lock_pid\$" "$first" "the engine's lease holder must be the session-lock holder"
   assert_re '^primary=claude$' "$first" "the engine must carry the primary-harness pin"

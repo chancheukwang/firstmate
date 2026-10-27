@@ -699,6 +699,9 @@ if (!loader.options.systemPrompt || !loader.options.systemPrompt.startsWith("You
   throw new Error("branch system prompt is not the generator's output");
 }
 if (loader.options.systemPrompt.length < 4096) throw new Error("branch prompt is below the provider caching minimum");
+for (const policy of ["# Scout completion policy", "# Captain-hold lifecycle policy", "Reporting a scout as finished and idle is not a substitute for that cleanup."]) {
+  if (!loader.options.systemPrompt.includes(policy)) throw new Error(`Pi branch did not receive cleanup policy: ${policy}`);
+}
 const bashTool = session.options.customTools.find((tool) => tool.name === "bash");
 const hooked = bashTool.__options.spawnHook({ command: "true", cwd: "/x", env: { PATH: "/bin" } });
 if (hooked.env.FM_SUPERVISION_ACTOR !== "branch") throw new Error("branch bash does not inject the branch actor");

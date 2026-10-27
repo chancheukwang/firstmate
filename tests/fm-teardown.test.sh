@@ -790,7 +790,7 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
 }
 
 test_local_only_truly_unpushed_refuses() {
-  local case_dir rc
+  local case_dir rc posture head
   case_dir=$(make_case truly-unpushed)
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "unpushed work"
@@ -803,6 +803,29 @@ test_local_only_truly_unpushed_refuses() {
 
   expect_code 1 "$rc" "truly-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "truly-unpushed: no REFUSED line in stderr"
+
+  # Completed-scout authority must not turn an idle local-only ship into
+  # disposable scratch, including while main is parked. No app is started.
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' "$$" > "$case_dir/state/.lock"
+  for posture in attended away; do
+    if [ "$posture" = away ]; then
+      FM_HOME="$case_dir" "$ROOT/bin/fm-afk-contract.sh" enter --words 'Finish safe cleanup.' >/dev/null \
+        || fail "could not enter isolated away posture"
+    fi
+    FM_HOME="$case_dir" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ PI_CODING_AGENT=true \
+      "$ROOT/bin/fm-lease.sh" claim task-x1 >/dev/null || fail "$posture: lease claim failed"
+    if FM_HOME="$case_dir" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ PI_CODING_AGENT=true \
+        run_teardown "$case_dir" > "$case_dir/branch.out" 2> "$case_dir/branch.err"; then
+      fail "$posture: branch discarded an unlanded local-only ship"
+    fi
+    assert_grep REFUSED "$case_dir/branch.err" "$posture: refusal was hidden"
+    assert_present "$case_dir/state/task-x1.meta" "$posture: refusal removed worker record"
+    [ "$(git -C "$case_dir/wt" rev-parse HEAD)" = "$head" ] \
+      || fail "$posture: refusal changed unlanded work"
+    FM_HOME="$case_dir" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" release task-x1 >/dev/null \
+      || fail "$posture: lease release failed"
+  done
   pass "local-only worktree with truly unpushed work is refused (safety preserved)"
 }
 
