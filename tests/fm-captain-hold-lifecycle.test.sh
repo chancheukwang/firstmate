@@ -2554,6 +2554,72 @@ EOF
   pass "a captain call with no routed work, a verified transfer, an open decision, and an answered call all stay silent"
 }
 
+# The branch uses the same completion gate while attended and away. The
+# backend is a fixture; this proves guarded commands, not model adherence.
+test_branch_scout_cleanup_preserves_completion_gates_in_both_postures() {
+  local posture home id out rc show seq
+  local -x FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ PI_CODING_AGENT=true
+  for posture in attended away; do
+    home=$(make_home "branch-scout-$posture")
+    id=sample-branch-review
+    printf '%s\n' "$$" > "$home/state/.lock"
+    if [ "$posture" = away ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'Finish safe cleanup.' >/dev/null \
+        || fail "could not enter isolated away posture"
+    fi
+    tasks_in "$home" add "$id" "Investigate sample branch cleanup" --kind scout \
+      --repo sample --start >/dev/null || fail "could not create branch scout fixture"
+    write_origin_meta "$home" "$id"
+    mkdir -p "$home/data/$id"
+    printf 'done: investigation finished and idle\n' > "$home/state/$id.status"
+    FM_HOME="$home" "$ROOT/bin/fm-lease.sh" claim "$id" >/dev/null \
+      || fail "$posture: branch could not claim scout lease"
+
+    rc=0
+    out=$(run_teardown "$home" "$id" 2>&1) || rc=$?
+    expect_code 1 "$rc" "$posture: missing report must refuse"
+    assert_contains "$out" "has no report" "$posture: missing report refusal was hidden"
+    assert_present "$home/state/$id.meta" "$posture: refusal removed scout metadata"
+    assert_not_contains "$out" "teardown $id complete" "$posture: refusal reported cleanup success"
+
+    printf '# Sample review\n\nThe captain must choose route north or south.\n' \
+      > "$home/data/$id/report.md"
+    rc=0
+    out=$(run_teardown "$home" "$id" 2>&1) || rc=$?
+    expect_code 1 "$rc" "$posture: unreviewed inventory must refuse"
+    assert_contains "$out" "has not passed the captain-call completion gate" \
+      "$posture: missing inventory refusal was hidden"
+    assert_present "$home/state/$id.meta" "$posture: missing inventory removed scout metadata"
+    printf 'needs-decision [key=route]: choose route north or south\n' >> "$home/state/$id.status"
+    if run_captain "$home" complete "$id" --none > "$home/none.out" 2>&1; then
+      fail "$posture: completion accepted an unrecorded captain call"
+    fi
+    run_captain "$home" hold "$id" --reason 'Choose route north or south' >/dev/null \
+      || fail "$posture: could not persist captain call"
+    run_captain "$home" complete "$id" "$id" >/dev/null \
+      || fail "$posture: could not attest complete captain-call inventory"
+    run_captain "$home" verify "$id" >/dev/null \
+      || fail "$posture: captain-call verification failed"
+    out=$(run_teardown "$home" "$id" 2>&1) \
+      || fail "$posture: ordinary branch cleanup refused: $out"
+    assert_contains "$out" "teardown $id complete" "$posture: successful cleanup has no receipt"
+    assert_absent "$home/state/$id.meta" "$posture: cleanup retained worker metadata"
+    assert_present "$home/data/$id/report.md" "$posture: cleanup removed report"
+    show=$(tasks_in "$home" show "$id" --full) || fail "$posture: captain call disappeared"
+    assert_contains "$show" "hold_kind: captain" "$posture: cleanup dropped captain call"
+    assert_contains "$show" "state: queued" "$posture: cleanup closed captain call"
+    assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
+      "$posture: retained captain call lost report link"
+    seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task "$id" \
+      --verdict captain --summary "$out") || fail "$posture: cleanup outcome was not recorded"
+    FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread \
+      | grep -F "teardown $id complete" >/dev/null || fail "$posture: durable outcome lost cleanup receipt $seq"
+    FM_HOME="$home" "$ROOT/bin/fm-lease.sh" release "$id" >/dev/null \
+      || fail "$posture: branch could not release scout lease"
+  done
+  pass "branch scout cleanup in both postures refuses incomplete work and retains inventoried captain calls and reports"
+}
+
 # The originating work item is itself the captain call, which is what the policy
 # prefers ("hold the work item the question gates"). Cleanup of that finished
 # work must never be the act that closes the captain's own row: the deliverable
@@ -4165,6 +4231,7 @@ test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal
+test_branch_scout_cleanup_preserves_completion_gates_in_both_postures
 test_teardown_never_closes_a_captain_held_task
 test_retained_row_artifacts_survive_captain_answers
 test_interrupted_cleanup_keeps_the_captain_call_recoverable
