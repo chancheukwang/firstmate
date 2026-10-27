@@ -66,6 +66,7 @@ Calm hides these rows:
 - Collapsed thinking labels.
 - The mid-turn assistant working-note blocks governed by the [shared preservation rule](#shared-preservation-rule-for-assistant-text) above.
 - The shells for the Pi built-in tool names Calm owns.
+- Native `codemode` call/source and text result shells, including their nested-call status and error rows.
 - Firstmate-owned tool shells listed in the [Pi tool audit](calm-mode-feasibility.md#firstmate-pi-tool-audit).
 - Canonically classified Firstmate operational user rows.
 
@@ -98,6 +99,9 @@ Input delivery, ordering, model context, session storage, diagnostics, and `/exp
 Every hidden Firstmate input remains available to the model and in serialized session data and exported artifacts.
 Legacy operational custom messages remain in session data and Pi's sidebar tree; depending on the Pi version, the main HTML transcript either omits them or includes them as rows hidden by default.
 Toggling Calm off restores ordinary rendering, and `Ctrl+O` expansion state is preserved.
+Codemode uses Pi's presentation-only renderer resolver, delegating to the remaining renderer chain when visible, without registering or replacing its executable tool definition.
+Its already-rendered and restored rows also follow the first toggle in a session that started with Calm off.
+HTML export uses the original codemode renderers, including direct SDK export and the delayed HTML fallback of `/share`; the export boundary is presentation-only and restores hidden rows after success or failure.
 
 ### What stays visible on Pi
 
@@ -105,13 +109,13 @@ Pi's supported presentation API does not expose a global transcript filter.
 These rows remain visible:
 
 - Expanded reasoning and its reserved spacing.
-- Built-in tool images.
+- Tool images, including images returned by codemode, which Pi adds outside the call/result renderer slots.
 - User-bash rows.
 - Skill and summary rows.
 - Generic status notices.
 - Other arbitrary custom-tool or extension rows.
 
-These are supported-API boundaries rather than hidden-content failures.
+Calm is therefore a scoped presentation policy, not an output-only guarantee for the whole transcript.
 
 ## Pi compatibility
 
@@ -123,6 +127,7 @@ It never refuses Pi solely because its version is newer than a previously verifi
 When Calm loads, the collapsed-thinking, operational-user-row, and queued-operational-row presentation adapters probe the exact Pi API seam they patch.
 If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter.
 `/calm`, the other adapters, and unrelated Pi extensions remain available.
+Codemode separately probes `registerToolRenderer` and `AgentSession.exportToHtml`; if either is missing, its adapter logs a diagnostic and leaves native codemode rendering unchanged.
 
 ### Session check for queued inputs
 
@@ -135,6 +140,7 @@ In that case `tests/fm-calm-pi-queue-retention-live-e2e.test.sh` fails naming th
 
 Calm's built-in tool presentation (`bash`, `read`, `edit`, `write`, `grep`, `find`, `ls`) shares Pi's single, unmerged override slot per name with any other extension that overrides the same tool.
 How Calm handles that shared slot depends on whether Calm was already on when the session started or reloaded.
+Codemode does not use those override slots and is not subject to the seven-tool first-activation limit below.
 
 **Session started with Calm off**
 

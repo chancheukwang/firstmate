@@ -2122,6 +2122,14 @@ Refresh this harness-dependent proof before accepting a cursor upgrade:
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
+## Pi Calm native codemode
+
+Verified on 2026-10-27 against installed Pi 1.0.4 with Node v26.10.0 on macOS using `bin/fm-test-run.sh tests/fm-calm-pi-extension.test.sh tests/fm-pi-primary-types.test.sh`.
+The installed loader/component guard and token-free bundled CLI guard cover codemode renderer composition, zero-height hidden rows, regular/fullscreen rendering, native nested bash execution, script errors, restored sessions, Calm-off expansion, and original export data.
+[`calm-mode-feasibility.md`](../calm-mode-feasibility.md#2026-10-27-pi-104-native-codemode-presentation) owns the exact output, additional export-method seam, and proof boundaries; [`calm.md`](../calm.md) owns current policy and unsupported row classes.
+Other primary harnesses do not load this Pi extension.
+Runtime backend integration is unchanged because the adapter runs entirely inside Pi's presentation layer, independently of the endpoint hosting it.
+
 ## Pi supervision branch
 
 The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.
