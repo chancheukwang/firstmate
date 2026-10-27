@@ -9,7 +9,8 @@
 // newer Pi solely for its version. The collapsed-thinking, operational-user, and
 // queued-operational presentation adapters probe the exact API they patch and degrade
 // independently with a diagnostic (see installCalmPresentationAdapter below) if a future
-// Pi removes it; Pi still exposes no global renderer for arbitrary built-in or custom rows.
+// Pi removes it. Pi's separate renderer resolver covers native codemode without
+// claiming its tool definition or execution.
 // docs/configuration.md owns the home-local Calm preference contract.
 //
 // Pi has one first-registration-wins ToolDefinition per tool name, with no merge or
@@ -34,8 +35,10 @@ import type {
   ExtensionUIContext,
   ToolDefinition,
   ToolInfo,
+  ToolRenderers,
   ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
+import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import {
   createBashToolDefinition,
   createEditToolDefinition,
@@ -121,6 +124,56 @@ function installCalmPresentationAdapter(name: string, install: () => void): void
     const reason = error instanceof Error ? error.message : String(error);
     console.error(`Firstmate Calm: ${name} presentation adapter unavailable, skipping. ${reason}`);
   }
+}
+
+type CalmCodemodeExportBoundary = {
+  depth: number;
+  repaint: () => void;
+  temporaryRepaints: Set<() => void>;
+};
+const CODEMODE_EXPORT_BOUNDARY = Symbol.for("firstmate:calm-codemode-export");
+
+// Renderer contexts do not distinguish TUI rows from HTML export. /share may
+// reach HTML export after asynchronous upload/auth checks, beyond the terminal
+// input's one-tick stock-rendering window. Scope this presentation-only bypass
+// to the actual exported method, including direct SDK exports and failures.
+// No installed files, session data, or tool execution are patched.
+function installCalmCodemodeExportBoundary(repaint: () => void): CalmCodemodeExportBoundary {
+  const registry = globalThis as typeof globalThis & {
+    [key: symbol]: CalmCodemodeExportBoundary | undefined;
+  };
+  const installed = registry[CODEMODE_EXPORT_BOUNDARY];
+  if (installed) {
+    installed.repaint = repaint;
+    return installed;
+  }
+  const AgentSession = PiCodingAgent.AgentSession;
+  const original = AgentSession?.prototype.exportToHtml;
+  if (typeof original !== "function") throw new Error("Pi AgentSession.exportToHtml is unavailable");
+  const boundary: CalmCodemodeExportBoundary = { depth: 0, repaint, temporaryRepaints: new Set() };
+  AgentSession.prototype.exportToHtml = async function (...args) {
+    boundary.depth++;
+    try {
+      return await original.apply(this, args);
+    } finally {
+      boundary.depth--;
+      if (boundary.depth === 0) {
+        // Include a live row first drawn during export, without retaining the
+        // exporter's throwaway row states/no-op invalidators for the session.
+        const repaints = [...boundary.temporaryRepaints, boundary.repaint];
+        boundary.temporaryRepaints.clear();
+        for (const invalidate of repaints) {
+          try {
+            invalidate();
+          } catch (error) {
+            console.error(`Firstmate Calm: codemode post-export repaint failed. ${String(error)}`);
+          }
+        }
+      }
+    }
+  };
+  registry[CODEMODE_EXPORT_BOUNDARY] = boundary;
+  return boundary;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -215,6 +268,79 @@ export default function (pi: ExtensionAPI) {
   const repaintCalmToolRows = (): void => {
     for (const invalidate of calmToolRowRepaints.values()) invalidate();
   };
+
+  // Register even on an off start: restored rows capture renderers before
+  // session_start, and must still respond to the first /calm toggle. Resolve the
+  // next renderer rather than importing or overriding codemode's tool definition.
+  // Native codemode draws nested-call/error chrome inside its result slot.
+  setCalmPresentation(loadCalmPreference());
+  installCalmPresentationAdapter("codemode-renderer", () => {
+    if (typeof pi.registerToolRenderer !== "function") {
+      throw new Error("Pi registerToolRenderer is unavailable");
+    }
+    const exportBoundary = installCalmCodemodeExportBoundary(repaintCalmToolRows);
+    pi.registerToolRenderer((toolName, next) => {
+      const original = next();
+      if (toolName !== "codemode" || !original?.renderCall || !original.renderResult) {
+        return original;
+      }
+      const { renderCall, renderResult } = original;
+      // Keep the downstream components separate from Calm's empty components and
+      // default-shell Box, so lastComponent retains the downstream renderer's type
+      // and identity after a hide/show cycle. Never add fields to Pi's row state.
+      const rows = new WeakMap<object, StandardShellState>();
+      const stateFor = (state: object): StandardShellState => {
+        let row = rows.get(state);
+        if (!row) {
+          row = {};
+          rows.set(state, row);
+        }
+        return row;
+      };
+      const shellFor = (
+        row: StandardShellState,
+        theme: Parameters<NonNullable<ToolRenderers["renderCall"]>>[1],
+        context: Parameters<NonNullable<ToolRenderers["renderCall"]>>[2],
+      ): Box => {
+        const background = context.isPartial
+          ? (text: string) => theme.bg("toolPendingBg", text)
+          : context.isError
+            ? (text: string) => theme.bg("toolErrorBg", text)
+            : (text: string) => theme.bg("toolSuccessBg", text);
+        const shell = row.shell ?? new Box(1, 1, background);
+        row.shell = shell;
+        shell.setBgFn(background);
+        shell.clear();
+        if (row.call) shell.addChild(row.call);
+        if (row.result) shell.addChild(row.result);
+        return shell;
+      };
+      return {
+        ...original,
+        renderShell: "self",
+        renderCall(args, theme, context) {
+          if (exportBoundary.depth > 0) exportBoundary.temporaryRepaints.add(context.invalidate);
+          if (exportRendering || exportBoundary.depth > 0) return renderCall(args, theme, context);
+          rememberCalmToolRow(context.state, context.invalidate);
+          if (calmPresentationHides("assistant-tool-call")) return new Container();
+          const row = stateFor(context.state);
+          row.call = renderCall(args, theme, { ...context, lastComponent: row.call });
+          return original.renderShell === "self" ? row.call : shellFor(row, theme, context);
+        },
+        renderResult(result, options, theme, context) {
+          if (exportBoundary.depth > 0) exportBoundary.temporaryRepaints.add(context.invalidate);
+          if (exportRendering || exportBoundary.depth > 0) return renderResult(result, options, theme, context);
+          rememberCalmToolRow(context.state, context.invalidate);
+          if (calmPresentationHides("tool-result")) return new Container();
+          const row = stateFor(context.state);
+          row.result = renderResult(result, options, theme, { ...context, lastComponent: row.result });
+          if (original.renderShell === "self") return row.result;
+          shellFor(row, theme, context);
+          return new Container();
+        },
+      };
+    });
+  });
 
   function wrapBuiltIn<TParams extends TSchema, TDetails, TState>(
     factory: DefinitionFactory<TParams, TDetails, TState>,

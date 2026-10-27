@@ -225,6 +225,7 @@ function registerCalm() {
     registerCommand(name, command) {
       if (name === "calm") calmCommand = command;
     },
+    registerToolRenderer() {},
     registerEntryRenderer() {},
     registerTool() {},
     getAllTools() {
@@ -358,6 +359,7 @@ const pi = {
   registerCommand(name, command) {
     if (name === "calm") calmCommand = command;
   },
+  registerToolRenderer() {},
   registerEntryRenderer() {},
   registerTool() {},
 };
@@ -826,6 +828,7 @@ function fakePi() {
       handlers.set(event, handler);
     },
     registerCommand() {},
+    registerToolRenderer() {},
     registerEntryRenderer() {},
     registerTool(tool) {
       tools.push(tool);
@@ -952,6 +955,7 @@ const pi = {
   registerCommand(name, command) {
     if (name === "calm") calmCommand = command;
   },
+  registerToolRenderer() {},
   registerEntryRenderer() {},
   // Mirrors Pi's own arbitration: first registrant for a name keeps it, silently.
   registerTool(tool) {
@@ -1189,6 +1193,7 @@ const pi = {
   registerCommand(name, command) {
     if (name === "calm") calmCommand = command;
   },
+  registerToolRenderer() {},
   registerEntryRenderer(customType, renderer) {
     entryRenderers.set(customType, renderer);
   },
@@ -1364,6 +1369,7 @@ const watchPi = {
   appendEntry() {},
   sendMessage() {},
   registerCommand() {},
+  registerToolRenderer() {},
   registerEntryRenderer() {},
 };
 const watchExtension = await import(`${pathToFileURL(process.env.WATCH_EXT).href}?test=${Date.now()}`);
@@ -1654,6 +1660,7 @@ async function assertStockHtmlRendering(command, submitData) {
   terminalInputHandler(submitData);
   const htmlRenderer = createToolHtmlRenderer({
     getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+    getToolRenderers: (name) => tools.find((tool) => tool.name === name),
     theme,
     cwd: process.cwd(),
   });
@@ -1685,6 +1692,7 @@ editorText = "/export remapped.html";
 terminalInputHandler("\r");
 const unmatchedRenderer = createToolHtmlRenderer({
   getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+  getToolRenderers: (name) => tools.find((tool) => tool.name === name),
   theme,
   cwd: process.cwd(),
 });
@@ -1883,6 +1891,7 @@ async function loadCalmExtension() {
     registerCommand(name, command) {
       if (name === "calm") calmCommand = command;
     },
+    registerToolRenderer() {},
     registerEntryRenderer() {},
     registerTool(tool) {
       registeredTools.push(tool.name);
@@ -3561,6 +3570,7 @@ const pi = {
   registerCommand(name, command) {
     if (name === "calm") calmCommand = command;
   },
+  registerToolRenderer() {},
   registerEntryRenderer() {},
   registerTool() {},
   getAllTools() {
@@ -3929,7 +3939,10 @@ SH
 
   : >"$dir/attempts-hang"
   : >"$out_file"
-  if FM_FAKE_CHROME_ATTEMPTS="$dir/attempts-hang" FM_CHROME_RENDER_WAIT_TICKS=3 \
+  # Give the real shell/exec enough startup headroom to record each attempt on
+  # a loaded host; 0.3s can kill the fixture before its first instruction runs.
+  # This still exercises three actual timeouts and keeps the exact retry count.
+  if FM_FAKE_CHROME_ATTEMPTS="$dir/attempts-hang" FM_CHROME_RENDER_WAIT_TICKS=20 \
     render_export_dom "$dir/chrome-hang" "$source_file" "$out_file" 9.9.9 >"$dir/report-hang"
   then
     fail "render_export_dom accepted a Chrome that never finished the DOM"
@@ -4169,7 +4182,7 @@ export default function (pi: ExtensionAPI): void {
 }
 TS
   printf '%s\n' '{"tui.input.submit":"alt+s"}' >"$config/keybindings.json"
-  printf '%s\n' '{"hideThinkingBlock":true}' >"$config/settings.json"
+  printf '%s\n' '{"hideThinkingBlock":true,"tuiMode":"regular"}' >"$config/settings.json"
   now=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
   cat >"$session_file" <<JSON
 {"type":"session","version":3,"id":"11111111-1111-4111-8111-111111111111","timestamp":"$now","cwd":"$project"}
@@ -4895,6 +4908,121 @@ JS
   pass "Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior"
 }
 
+# Exercise the bundled CLI too: the loader/component test alone cannot prove
+# its embedded module identity or the real transcript repaint path.
+test_native_codemode_tui() {
+  local fixture project config home session_file mode snapshot restored version marker i
+  fm_live_gate default-on FM_PI_CALM_CODEMODE_TUI pi tmux node || return 0
+  version=$(pi --version 2>/dev/null || true)
+  record_pi_version_evidence "$version" "native codemode TUI"
+  fixture="$TMP_ROOT/native-codemode-tui"
+  project="$fixture/project"
+  config="$fixture/agent"
+  home="$fixture/home"
+  session_file="$fixture/session.jsonl"
+  snapshot="$fixture/screen.txt"
+  restored="$fixture/restored.txt"
+  mkdir -p "$project/.pi/extensions/lib" "$config" "$home/config"
+  cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
+  cp "$ROOT/.pi/extensions/lib/"*.ts "$project/.pi/extensions/lib/"
+  cp "$ROOT/tests/assets/fm-calm-codemode-provider.ts" "$project/provider.ts"
+  for mode in regular fullscreen; do
+    printf '%s\n' on >"$home/config/calm"
+    printf '{"tuiMode":"%s","hideThinkingBlock":true}\n' "$mode" >"$config/settings.json"
+    session_file="$fixture/$mode.jsonl"
+    tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 110 -y 50 \
+      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./provider.ts -e builtin:codemode --tools read,bash,codemode --session '$session_file'; rc=\$?; printf '\\nNATIVE_PI_EXIT=%s\\n' \"\$rc\"; sleep 20"
+    wait_for_text "$snapshot" "provider.ts" || fail "Pi $version $mode did not load the local codemode fixture"
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/native-calm-example"
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+    wait_for_text "$snapshot" "NATIVE_CALM_PROMPT" || fail "Pi $version $mode did not start the native codemode example"
+    wait_for_text "$snapshot" "◿│◣" || fail "Pi $version $mode did not show the Calm boat during native execution"
+    assert_not_contains "$(cat "$snapshot")" NATIVE_CALM_FINAL "streaming fixture settled before its in-flight assertion"
+    # The nested sleep leaves a real in-flight codemode row while the boat runs.
+    for marker in 'const result' NATIVE_NESTED_OUTPUT NATIVE_CODEMODE_ERROR; do
+      assert_not_contains "$(cat "$snapshot")" "$marker" "Calm leaked native streaming codemode in $mode"
+    done
+    wait_for_text "$snapshot" "NATIVE_CALM_FINAL" || fail "Pi $version $mode native codemode did not finish"
+    for marker in 'const result' NATIVE_NESTED_OUTPUT NATIVE_CODEMODE_ERROR; do
+      assert_not_contains "$(cat "$snapshot")" "$marker" "Calm leaked settled native codemode in $mode"
+    done
+    if [ -n "${FM_CALM_EVIDENCE_DIR:-}" ]; then
+      mkdir -p "$FM_CALM_EVIDENCE_DIR"
+      cp "$snapshot" "$FM_CALM_EVIDENCE_DIR/$mode-calm-on.txt"
+    fi
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+    wait_for_text "$snapshot" "Error: NATIVE_CODEMODE_ERROR" || fail "Pi $version $mode Calm off did not restore the native error result"
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-o
+    wait_for_text "$snapshot" '"output":"NATIVE_NESTED_OUTPUT"' || fail "Pi $version $mode expansion lost the native nested result"
+    assert_contains "$(cat "$snapshot")" "✓ bash" "Calm off lost nested-call status in $mode"
+    assert_contains "$(cat "$snapshot")" 'tools.bash' "Calm off lost native code in $mode"
+    assert_contains "$(cat "$snapshot")" NATIVE_CALM_FINAL "Calm off lost assistant text in $mode"
+    node - "$session_file" <<'JS' || fail "native codemode did not retain execution data in $mode"
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const entries = fs.readFileSync(process.argv[2], "utf8").trim().split("\n").map(JSON.parse);
+const result = entries.find((entry) => entry.message?.toolName === "codemode")?.message;
+assert.ok(result?.isError, "real native script must report failure");
+assert.ok(result.content.some((block) => block.text?.includes("NATIVE_NESTED_OUTPUT")));
+assert.ok(result.content.some((block) => block.text?.includes("NATIVE_CODEMODE_ERROR")));
+assert.ok(result.details.calls.some((call) => call.name === "bash" && call.status === "ok"));
+assert.ok(result.nestedCalls.calls.some((call) => call.name === "bash"));
+JS
+    if [ -n "${FM_CALM_EVIDENCE_DIR:-}" ]; then
+      cp "$snapshot" "$FM_CALM_EVIDENCE_DIR/$mode-calm-off.txt"
+    fi
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+    i=0
+    while [ "$i" -lt 120 ] && [ "$(cat "$home/config/calm")" != on ]; do sleep 0.05; i=$((i + 1)); done
+    [ "$(cat "$home/config/calm")" = on ] || fail "native codemode toggle did not persist on"
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+    wait_for_text "$snapshot" 'NATIVE_PI_EXIT=0' || fail "isolated native Pi did not exit cleanly"
+    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION"
+    tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 110 -y 50 \
+      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./provider.ts -e builtin:codemode --tools read,bash,codemode --session '$session_file'; rc=\$?; printf '\\nNATIVE_PI_EXIT=%s\\n' \"\$rc\"; sleep 20"
+    wait_for_text "$restored" NATIVE_CALM_FINAL || fail "Pi $version $mode did not restore native transcript"
+    for marker in 'const result' NATIVE_NESTED_OUTPUT NATIVE_CODEMODE_ERROR; do
+      assert_not_contains "$(cat "$restored")" "$marker" "Calm leaked restored codemode in $mode"
+    done
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+    wait_for_text "$snapshot" 'NATIVE_PI_EXIT=0' || fail "isolated restored Pi did not exit cleanly"
+    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION"
+  done
+  pass "Pi $version bundled native codemode executes nested bash, hides streaming/settled/restored error rows in both TUI modes, and restores code/results with Calm off"
+}
+
+test_native_codemode_rendering() {
+  local fixture out status
+  fm_live_gate default-on FM_PI_CALM_CODEMODE node npm || return 0
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed Pi package missing for native codemode rendering"
+    return 0
+  fi
+  fixture="$TMP_ROOT/native-codemode"
+  mkdir -p "$fixture/lib" "$fixture/home/config" "$fixture/node_modules/@earendil-works"
+  cp "$EXT" "$fixture/fm-calm.ts"
+  cp "$ROOT/.pi/extensions/lib/"*.ts "$fixture/lib/"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
+  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" \
+    PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node "$ROOT/tests/assets/fm-calm-codemode.mjs" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "installed Pi native codemode rendering failed: $out"
+  printf '%s\n' "$out"
+  if [ -n "${FM_CALM_EVIDENCE_DIR:-}" ]; then
+    mkdir -p "$FM_CALM_EVIDENCE_DIR"
+    cp "$fixture/home/rendered-rows.txt" "$FM_CALM_EVIDENCE_DIR/codemode-rendered-rows.txt"
+  fi
+}
+
+test_native_codemode_rendering
+test_native_codemode_tui
 test_home_resolution
 test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
